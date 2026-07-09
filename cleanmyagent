@@ -764,39 +764,44 @@ def report(rows, mcp_rows, sort="action"):
     for r in rows:
         if r["bundle"] or r["origin"] == "dist":
             continue
+        # [session] hints hit the always-loaded budget — the core anti-patterns
         if r["cost"] > 200:
-            hints.append((r, r["cost"], f"desc {r['cost']:,} tok — paid EVERY session; keep "
-                                        "trigger phrases, move detail into the body"))
+            hints.append((r, 0, r["cost"], f"desc {r['cost']:,} tok — paid EVERY session; "
+                                           "keep trigger phrases, move detail into the body"))
         elif r["desc_seps"] > 15:
-            hints.append((r, r["cost"], f"desc {r['cost']:,} tok, keyword catalog "
-                                        f"({r['desc_seps']} separators) — collapse into "
-                                        "trigger patterns"))
-        if r["body"] > 2500 and not r["refs"]:
-            hints.append((r, r["body"], f"body {r['body']:,} tok — paid on every INVOKE, "
-                                        "whole; split into references/ (loads on demand)"))
+            hints.append((r, 0, r["cost"], f"desc {r['cost']:,} tok, keyword catalog "
+                                           f"({r['desc_seps']} separators) — collapse into "
+                                           "trigger patterns"))
         if 0 < r["body"] < r["cost"]:
-            hints.append((r, r["cost"], f"desc ({r['cost']:,} tok) longer than body "
-                                        f"({r['body']:,} tok) — the tax outweighs the payload"))
-    # bundle/plugin anti-pattern: paying a suite-sized tax for a sliver of use
+            hints.append((r, 0, r["cost"], f"desc ({r['cost']:,} tok) longer than body "
+                                           f"({r['body']:,} tok) — the tax outweighs the payload"))
+        # [invoke] hints only matter for skills you actually invoke — weighted by use
+        if r["body"] > 2500 and not r["refs"] and r["uses"] > 0:
+            hints.append((r, 1, r["body"] * r["uses"],
+                          f"body {r['body']:,} tok × {r['uses']} invokes — loads whole "
+                          "each time; split into references/ (loads on demand)"))
+    # bundle/plugin anti-pattern: paying a suite-sized session tax for a sliver of use
     for bundle, brows in bundles.items():
         used = sum(1 for r in brows if r["uses"] > 0)
         bcost = sum(r["cost"] for r in brows)
         if brows and used / len(brows) < 0.25 and bcost > 800:
             what = f"claude plugin disable {bundle[7:]}" if bundle.startswith("plugin:") \
                 else "disable the suite"
-            hints.append(({"name": bundle}, bcost,
-                          f"{used}/{len(brows)} skills used for ~{bcost:,} tok/session — "
-                          f"{what}, re-enable when needed"))
+            hints.append(({"name": bundle}, 0, bcost,
+                          f"{used}/{len(brows)} skills used for ~{bcost:,} tok EVERY session "
+                          f"— {what}, re-enable when needed"))
     # MCP anti-pattern: a server whose schemas ride along for 1-2 niche tools
     for r in mcp_rows:
         if r["uses"] and len(r["tools_used"]) <= 2 and r["uses"] < 10:
-            hints.append(({"name": r["server"]}, 0,
+            hints.append(({"name": r["server"]}, 0, 0,
                           f"mcp server used {r['uses']}× via {len(r['tools_used'])} tool(s) "
                           "— its whole tool schema loads every session; consider removing"))
 
-    hints.sort(key=lambda h: -h[1])
+    # session-tax issues first (the tool's thesis), invoke-cost issues after
+    hints.sort(key=lambda h: (h[1], -h[2]))
     if hints:
-        lines = [f"{yellow('▲')} {h[0]['name']:<{w}}  {dim(h[2])}"
+        tag = [cyan("[session]"), dim("[invoke] ")]
+        lines = [f"{yellow('▲')} {tag[h[1]]} {h[0]['name']:<{w}}  {dim(h[3])}"
                  for h in hints[:12]]
         if len(hints) > 12:
             lines.append(dim(f"  … {len(hints) - 12} more"))
