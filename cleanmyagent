@@ -983,67 +983,98 @@ def report(rows, mcp_rows, sort="action", rev=False, full_hints=False):
         lines.append(dim("first call seen ≈ install date (config has none)"))
         side.append(("mcp servers", lines))
 
-    print()
-    print(render_layout(panels, side, term_w))
-    hint = f"skill tables sorted by {bold(sort)} {arrow}"
-    if INTERACTIVE:
-        hint += dim("  ·  sort: ") + bold("a") + dim("ction ") + bold("c") + dim("ost ") \
-             + bold("u") + dim("ses ") + bold("i") + dim("nstalled ") + bold("l") + dim("ast ") \
-             + bold("n") + dim("ame (again = reverse)  ·  ") + bold("h") + dim(" all hints  ·  ") \
-             + bold("q") + dim(" quit")
-    print(hint)
-    print(dim("run with ") + bold("--fix") + dim(" to print cleanup commands (nothing is executed)") + "\n")
+    return render_layout(panels, side, term_w).splitlines()
 
 
 SORT_KEYS = {"a": "action", "c": "cost", "u": "uses", "i": "installed", "l": "last", "n": "name"}
 INTERACTIVE = False
 
+KEYMAP = {"[A": "up", "OA": "up", "[B": "down", "OB": "down",
+          "[5~": "pgup", "[6~": "pgdn", "[H": "home", "[F": "end",
+          "[1~": "home", "[4~": "end"}
 
-def interactive_loop(rows, mcp_rows, sort):
-    # btop-style: one keypress → instant re-render (data is already in memory).
-    # Runs in the alternate screen buffer so re-renders leave no ghosting and
-    # quitting restores the shell exactly as it was.
+
+def read_key(fd):
+    """One decoded keypress; escape sequences (wheel scroll = arrows in the alt
+    screen) become named keys instead of leaking letters into sort commands."""
     import select
+    ch = os.read(fd, 1).decode(errors="replace")
+    if ch == "":
+        return "q"  # EOF — bail out instead of spinning
+    if ch != "\x1b":
+        return ch
+    seq = ""
+    while len(seq) < 8 and select.select([fd], [], [], 0.02)[0]:
+        c = os.read(fd, 1).decode(errors="replace")
+        seq += c
+        if c.isalpha() or c == "~":
+            break
+    return KEYMAP.get(seq, "")  # unknown sequences are ignored, never sort keys
+
+
+def status_bar(sort, rev, offset, total, height):
+    arrow = "↑" if rev else "↓"
+    top, bottom = offset + 1, min(offset + height, total)
+    pos = f"{top}-{bottom}/{total}"
+    return (c("7", f" {pos} ") + dim("  sorted by ") + bold(f"{sort} {arrow}")
+            + dim("  ·  scroll ") + bold("wheel ↑↓ jk space") + dim("  ·  sort ")
+            + bold("a c u i l n") + dim(" (again=reverse)  ·  ") + bold("h")
+            + dim(" hints  ·  ") + bold("q") + dim(" quit"))
+
+
+def interactive_pager(rows, mcp_rows, sort):
+    """btop-style pager in the alternate screen: the report scrolls internally
+    (alt screen has no scrollback), sort keys re-render, unknown input ignored."""
     import termios
     import tty
     fd = sys.stdin.fileno()
-    rev, full_hints, in_alt = False, False, False
-
-    def drain():  # swallow the rest of an escape sequence (scroll/arrows send ESC [ ...)
-        while select.select([fd], [], [], 0.01)[0]:
-            os.read(fd, 64)
-
+    rev, full_hints, offset = False, False, 0
+    lines = report(rows, mcp_rows, sort, rev, full_hints)
+    old = termios.tcgetattr(fd)
+    sys.stdout.write("\x1b[?1049h")
     try:
+        tty.setcbreak(fd)
         while True:
-            old = termios.tcgetattr(fd)
-            try:
-                tty.setcbreak(fd)
-                ch = sys.stdin.read(1).lower()
-                if ch == "\x1b":
-                    drain()  # mouse scroll / arrow keys must not trigger sort keys
-                    continue
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            if ch in ("q", "\x03", "\x04"):
-                return
-            if ch == "h":
+            size = shutil.get_terminal_size((120, 40))
+            height = max(5, size.lines - 1)  # one row reserved for the status bar
+            offset = max(0, min(offset, max(0, len(lines) - height)))
+            view = lines[offset:offset + height]
+            out = ["\x1b[H"]
+            out += [clip(l, size.columns) + "\x1b[K\n" for l in view]
+            out.append("\x1b[J")  # wipe anything below shorter frames
+            out.append(clip(status_bar(sort, rev, offset, len(lines), height),
+                            size.columns) + "\x1b[K")
+            sys.stdout.write("".join(out))
+            sys.stdout.flush()
+
+            k = read_key(fd)
+            if k in ("q", "\x03", "\x04"):
+                return lines
+            if k in ("up", "k"):
+                offset -= 1
+            elif k in ("down", "j"):
+                offset += 1
+            elif k == "pgup":
+                offset -= height
+            elif k in ("pgdn", " "):
+                offset += height
+            elif k in ("home", "g"):
+                offset = 0
+            elif k in ("end", "G"):
+                offset = len(lines)
+            elif k == "h":
                 full_hints = not full_hints
-            elif ch in SORT_KEYS:
-                if SORT_KEYS[ch] == sort:
+                lines = report(rows, mcp_rows, sort, rev, full_hints)
+            elif k.lower() in SORT_KEYS:
+                if SORT_KEYS[k.lower()] == sort:
                     rev = not rev  # same key again flips the direction
                 else:
-                    sort, rev = SORT_KEYS[ch], False
-            else:
-                continue
-            if not in_alt:
-                sys.stdout.write("\x1b[?1049h")
-                in_alt = True
-            sys.stdout.write("\x1b[2J\x1b[H")
-            report(rows, mcp_rows, sort, rev, full_hints)
+                    sort, rev = SORT_KEYS[k.lower()], False
+                lines = report(rows, mcp_rows, sort, rev, full_hints)
     finally:
-        if in_alt:
-            sys.stdout.write("\x1b[?1049l")
-            sys.stdout.flush()
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\x1b[?1049l")
+        sys.stdout.flush()
 
 
 def main():
@@ -1078,12 +1109,18 @@ def main():
         print()
     else:
         INTERACTIVE = sys.stdout.isatty() and sys.stdin.isatty()
-        report(rows, mcp_rows, sort)
         if INTERACTIVE:
             try:
-                interactive_loop(rows, mcp_rows, sort)
+                # on quit, the last view lands in the normal buffer's scrollback
+                lines = interactive_pager(rows, mcp_rows, sort)
             except (ImportError, OSError, KeyboardInterrupt):
-                pass
+                lines = report(rows, mcp_rows, sort)
+        else:
+            lines = report(rows, mcp_rows, sort)
+        print()
+        print("\n".join(lines))
+        print(dim("run with ") + bold("--fix")
+              + dim(" to print cleanup commands (nothing is executed)") + "\n")
 
 
 if __name__ == "__main__":

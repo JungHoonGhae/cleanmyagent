@@ -100,9 +100,12 @@ Transcript scanning is incrementally cached (`~/.cache/cleanmyagent/usage.json`,
 keyed by file mtime+size): the first run walks everything (~15s on a 770MB
 history), repeat runs only re-scan changed session files (~0.2s).
 
-On a tty the report stays open btop-style: press `a`/`c`/`u`/`i`/`l`/`n` to
-re-sort by action/cost/uses/installed/last/name instantly (the scan runs only
-once), `q` to quit. Panels stretch to the terminal width.
+On a tty the report opens as a btop-style pager (alternate screen, no
+scrollback pollution): scroll with the **mouse wheel**, `↑`/`↓`, `j`/`k`,
+`PgUp`/`PgDn`/`space`, `g`/`G`; re-sort instantly with `a`/`c`/`u`/`i`/`l`/`n`
+(same key again reverses); `h` shows all hints; `q` quits and leaves the last
+view in your scrollback. Unknown keys and stray escape sequences are ignored —
+scrolling can never trigger a command. Panels stretch to the terminal width.
 
 Extra panels on a color terminal:
 
