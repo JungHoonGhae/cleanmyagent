@@ -568,7 +568,7 @@ def sort_key(r):
             -r["cost"])
 
 
-def table_lines(rows, width):
+def table_lines(rows, width, max_cost):
     lines = []
     for r in rows:
         paint = VERDICT_PAINT[r["status"]]
@@ -576,7 +576,8 @@ def table_lines(rows, width):
         origin = {"custom": cyan("✎ custom"), "dist": dim("dist"), "?": yellow("?")}[r["origin"]]
         lines.append(f"{name if r['status'] != 'unused' else dim(name)}  "
                      f"{origin}{' ' * (8 - vlen(origin))}  "
-                     f"{r['cost']:>5}  {fmt_installed(r['installed']):>9}  "
+                     f"{r['cost']:>5} {bar(r['cost'] / max_cost, 6)}  "
+                     f"{fmt_installed(r['installed']):>9}  "
                      f"{r['uses'] if r['uses'] else '·':>5}  "
                      f"{fmt_last(r['last']):>8}  {paint(r['verdict']):<14}")
     return lines
@@ -605,7 +606,8 @@ def report(rows, mcp_rows):
               "hermes" if os.path.isdir(HERMES) else None]
 
     w = max(max((len(r["name"]) for r in rows), default=10), 10)
-    header = dim(f"{'SKILL':<{w}}  {'ORIGIN':<8}  {'COST':>5}  {'INSTALLED':>9}  "
+    max_cost = max((r["cost"] for r in rows), default=1) or 1
+    header = dim(f"{'SKILL':<{w}}  {'ORIGIN':<8}  {'TOK/SESSION':>12}  {'INSTALLED':>9}  "
                  f"{'USES':>5}  {'LAST':>8}  {'VERDICT':<14}")
 
     frac = dead_cost / total if total else 0
@@ -614,10 +616,13 @@ def report(rows, mcp_rows):
         "",
         f"{'context tax / session':<22} {bar(1.0, 28)} ~{total:,} tok",
         f"{'never-used share':<22} {bar(frac, 28)} ~{dead_cost:,} tok ({frac:.0%})",
+        "",
+        dim("TOK/SESSION = tokens this skill's description force-loads into"),
+        dim("every single session, used or not — that's the context tax"),
     ])]
 
     panels.append((f"standalone skills ({len(standalone)})",
-                   [header] + table_lines(standalone, w)))
+                   [header] + table_lines(standalone, w, max_cost)))
 
     for bundle, brows in sorted(bundles.items(), key=lambda kv: -len(kv[1])):
         brows.sort(key=sort_key)
@@ -626,7 +631,7 @@ def report(rows, mcp_rows):
         lines = [utilization_line("suite utilization", used, len(brows))]
         if used:
             lines.append(dim("members are kept together — deleting one breaks/reverts on update"))
-        lines += ["", header] + table_lines(brows, w)
+        lines += ["", header] + table_lines(brows, w, max_cost)
         tag = f" @{market}" if market else ""
         panels.append((f"{bundle}{tag} · {len(brows)} skills", lines))
 

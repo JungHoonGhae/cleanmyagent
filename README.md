@@ -15,14 +15,14 @@ across **Claude Code, Codex, opencode, Gemini CLI, OpenClaw, and Hermes Agent** 
 │ context tax / session  ████████████████████████████ ~10,398 tok        │
 │ never-used share       ███████████████████░░░░░░░░░ ~6,964 tok (67%)   │
 ╰────────────────────────────────────────────────────────────────────────╯
-╭─ standalone skills (34) ───────────────────────────────────────────────╮
-│ SKILL                     COST  INSTALLED   USES      LAST  VERDICT    │
-│ utm-macos-vm               199        27d      ·         —  ✗ unused   │
-│ figma-diff                 133       113d      2   87d ago  ◌ stale 87d│
-│ brandkit                   118        12d      ·         —  ◦ new (12d)│
-│ intelliantech              405       115d    154     today  ✓ keep     │
-│ ...                                                                    │
-╰────────────────────────────────────────────────────────────────────────╯
+╭─ standalone skills (32) ────────────────────────────────────────────────────────────╮
+│ SKILL             ORIGIN     TOK/SESSION  INSTALLED   USES      LAST  VERDICT       │
+│ utm-macos-vm      ?           199 ███░░░        27d      ·         —  ✗ unused      │
+│ figma-diff        ✎ custom    133 ██░░░░       113d      2   87d ago  ◌ stale 87d   │
+│ brandkit          ?           118 ██░░░░        12d      ·         —  ◦ new (12d)   │
+│ intelliantech     ✎ custom    405 █████░       115d    154     today  ✓ keep        │
+│ ...                                                                                 │
+╰─────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ gstack · 56 skills ───────────────────────────────────────────────────╮
 │ suite utilization         12/56   ███░░░░░░░░░░░░░  21%                │
 │ members are kept together — deleting one breaks/reverts on update      │
