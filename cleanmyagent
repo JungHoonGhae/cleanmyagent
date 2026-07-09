@@ -213,6 +213,13 @@ TS_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
 CODEX_SKILL_RE = re.compile(r"skills/([A-Za-z0-9_.-]+)/SKILL\.md")
 
 
+def status(msg=""):
+    """Transient progress line on stderr — the claude scan alone chews ~15s of transcripts."""
+    if sys.stderr.isatty():
+        sys.stderr.write("\r\x1b[2K" + (f"\x1b[2m⏳ {msg}\x1b[0m" if msg else ""))
+        sys.stderr.flush()
+
+
 def bump(d, key, ts):
     cnt, last = d.get(key, (0, ""))
     d[key] = (cnt + 1, max(last, ts or ""))
@@ -233,8 +240,12 @@ def grep_lines(patterns, root, include="*.jsonl"):
 
 
 def usage_claude(skills, mcp):
+    n = 0
     for line in grep_lines(['"name":"Skill"', "command-name", '"name":"mcp__'],
                            os.path.join(CLAUDE, "projects")):
+        n += 1
+        if n % 2000 == 0:
+            status(f"scanning claude-code transcripts … {n:,} events")
         ts_m = TS_RE.search(line)
         ts = ts_m.group(1) if ts_m else ""
         if '"name":"Skill"' in line:
@@ -346,13 +357,20 @@ def usage_gstack(skills):
 
 def usage():
     skills, mcp = {}, {}
+    status("scanning claude-code transcripts …")
     usage_claude(skills, mcp)
+    status("scanning codex sessions …")
     usage_skillmd_mentions(skills, os.path.join(CODEX, "sessions"), "### Available skills")
+    status("scanning openclaw sessions …")
     usage_skillmd_mentions(skills, os.path.join(OPENCLAW, "agents"), "<available_skills>")
+    status("scanning opencode db …")
     usage_opencode(skills)
+    status("scanning gemini chats …")
     usage_gemini(skills)
+    status("scanning hermes db …")
     usage_hermes(skills)
     usage_gstack(skills)
+    status()  # clear the line
     return skills, mcp
 
 
