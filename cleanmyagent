@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """cleanmyagent — audit what your coding agent's skills/plugins/MCP actually cost vs. how much you use them.
 
-v0: Claude Code only. Reads local files, no network, no deps.
-  inventory: ~/.claude/skills/*/SKILL.md + ~/.claude/plugins/installed_plugins.json
-  usage:     ~/.claude/projects/**/*.jsonl (Skill tool calls, /slash commands, mcp__ tool calls)
+Reads local files, no network, no deps.
+  inventory: ~/.claude/skills, ~/.agents/skills, ~/.codex/skills (SKILL.md descriptions)
+             + ~/.claude/plugins/installed_plugins.json
+  usage:     Claude Code ~/.claude/projects/**/*.jsonl (Skill tool calls, /slash commands, mcp__ tool calls)
+             Codex      ~/.codex/sessions/**/*.jsonl (SKILL.md opens)
+  --fix:     print the rm/disable commands for never-used skills (never executes them)
 """
 import json
 import os
@@ -13,6 +16,8 @@ import sys
 from datetime import datetime, timezone
 
 CLAUDE = os.path.expanduser(os.environ.get("CLAUDE_HOME", "~/.claude"))
+CODEX = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
+AGENTS = os.path.expanduser("~/.agents")
 STALE_DAYS = 30
 
 
@@ -39,14 +44,20 @@ def read_frontmatter_desc(path):
 def inventory():
     """Return {key: {"source", "cost", "path"}} for every installed skill."""
     inv = {}
-    # user skills: ~/.claude/skills/<name>/SKILL.md
-    skills_dir = os.path.join(CLAUDE, "skills")
-    if os.path.isdir(skills_dir):
+    # skill dirs: <dir>/<name>/SKILL.md. Same skill in two dirs → first source wins
+    # (agents standard: ~/.agents is shared, per-agent dirs usually mirror it).
+    for skills_dir, source in ((os.path.join(CLAUDE, "skills"), "claude"),
+                               (os.path.join(AGENTS, "skills"), "agents"),
+                               (os.path.join(CODEX, "skills"), "codex")):
+        if not os.path.isdir(skills_dir):
+            continue
         for name in sorted(os.listdir(skills_dir)):
+            if name.startswith("."):
+                continue
             p = os.path.join(skills_dir, name, "SKILL.md")
-            if os.path.isfile(p):
+            if os.path.isfile(p) and name not in inv:
                 desc = read_frontmatter_desc(p)
-                inv[name] = {"source": "user", "cost": est_tokens(name + desc), "path": p}
+                inv[name] = {"source": source, "cost": est_tokens(name + desc), "path": p}
     # plugin skills: installPath/skills/<name>/SKILL.md, invoked as "plugin:name"
     manifest = os.path.join(CLAUDE, "plugins", "installed_plugins.json")
     try:
@@ -108,7 +119,39 @@ def usage():
         for m in MCP_RE.finditer(line):
             bump(mcp, m.group(1)[len("mcp__"):], ts)
     proc.wait()
+
+    # Codex: skills are used by opening their SKILL.md; count path mentions,
+    # excluding the per-session skill-list injection ("### Available skills").
+    # ponytail: mention ≈ use — good enough for keep/delete ranking.
+    sessions = os.path.join(CODEX, "sessions")
+    if os.path.isdir(sessions):
+        proc = subprocess.Popen(
+            ["grep", "-rh", "--include=*.jsonl", "SKILL.md", sessions],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+        path_re = re.compile(r"skills/([A-Za-z0-9_.-]+)/SKILL\.md")
+        for line in proc.stdout:
+            if "### Available skills" in line:
+                continue
+            ts_m = TS_RE.search(line)
+            ts = ts_m.group(1) if ts_m else ""
+            for name in set(path_re.findall(line)):
+                if not name.startswith("."):
+                    bump(skills, name, ts)
+        proc.wait()
     return skills, mcp
+
+
+def configured_mcp():
+    """MCP servers configured in ~/.claude.json (global + per-project)."""
+    servers = set()
+    try:
+        cfg = json.load(open(os.path.join(os.path.expanduser("~"), ".claude.json")))
+    except (OSError, ValueError):
+        return servers
+    servers.update(cfg.get("mcpServers", {}))
+    for proj in cfg.get("projects", {}).values():
+        servers.update(proj.get("mcpServers", {}))
+    return servers
 
 
 def age_days(iso):
@@ -137,8 +180,29 @@ def fmt_last(iso):
     return "today" if d == 0 else f"{d}d ago"
 
 
+def fix_commands(rows):
+    """Cleanup commands for never-used skills. Printed, never executed."""
+    cmds = []
+    by_plugin = {}
+    for r in rows:
+        src = r["source"]
+        if src.startswith("plugin:"):
+            by_plugin.setdefault(src[7:], []).append(r)
+        elif r["uses"] == 0:
+            # a skill can live in several skill dirs (inventory dedupes) — rm every copy
+            for base in (CLAUDE, AGENTS, CODEX):
+                d = os.path.join(base, "skills", r["name"])
+                if os.path.isdir(d):
+                    cmds.append(f"rm -rf {d}")
+    for plugin, prows in sorted(by_plugin.items()):
+        if all(r["uses"] == 0 for r in prows):
+            cmds.append(f"claude plugin disable {plugin}  # all {len(prows)} skills unused")
+    return cmds
+
+
 def main():
     as_json = "--json" in sys.argv
+    as_fix = "--fix" in sys.argv
     inv = inventory()
     skill_use, mcp_use = usage()
 
@@ -146,11 +210,22 @@ def main():
     for key, meta in inv.items():
         cnt, last = skill_use.get(key, (0, ""))
         rows.append({"name": key, "source": meta["source"], "cost": meta["cost"],
-                     "uses": cnt, "last": last, "verdict": verdict(cnt, last)})
+                     "path": meta["path"], "uses": cnt, "last": last,
+                     "verdict": verdict(cnt, last)})
     rows.sort(key=lambda r: (r["uses"] > 0, -r["cost"]))
 
+    for s in configured_mcp():
+        mcp_use.setdefault(s, (0, ""))
     mcp_rows = [{"server": k, "uses": c, "last": t} for k, (c, t) in
                 sorted(mcp_use.items(), key=lambda kv: -kv[1][0])]
+
+    if as_fix:
+        for c in fix_commands(rows):
+            print(c)
+        for r in mcp_rows:
+            if r["uses"] == 0:
+                print(f"claude mcp remove {r['server']}  # configured, never called")
+        return
 
     if as_json:
         json.dump({"skills": rows, "mcp": mcp_rows}, sys.stdout, ensure_ascii=False, indent=2)
@@ -171,7 +246,11 @@ def main():
     if mcp_rows:
         print("\nMCP tool calls seen in transcripts (server: calls, last):")
         for r in mcp_rows:
-            print(f"  {r['server']}: {r['uses']} ({fmt_last(r['last'])})")
+            note = "  ❌ configured, never called" if r["uses"] == 0 else ""
+            print(f"  {r['server']}: {r['uses']} ({fmt_last(r['last'])}){note}")
+
+    if dead:
+        print("\nRun with --fix to print the cleanup commands (nothing is executed).")
 
 
 if __name__ == "__main__":

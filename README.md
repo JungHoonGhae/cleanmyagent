@@ -24,18 +24,20 @@ figma-diff                           133      2   87d ago  ⚠️  stale (87d)
 ```bash
 ./cleanmyagent          # human-readable audit table
 ./cleanmyagent --json   # machine-readable
+./cleanmyagent --fix    # print cleanup commands (rm / plugin disable / mcp remove) — never executes them
 ```
 
 Local-first: reads only local files, no network, no accounts. Python 3 stdlib, zero deps.
 
-## What it reads (v0: Claude Code)
+## What it reads
 
 | Data | Source |
 |------|--------|
-| User skills + descriptions | `~/.claude/skills/*/SKILL.md` |
+| Skills + descriptions | `~/.claude/skills`, `~/.agents/skills` (open standard), `~/.codex/skills` — `*/SKILL.md` |
 | Plugin skills | `~/.claude/plugins/installed_plugins.json` → each plugin's `skills/` |
-| Skill invocations | `~/.claude/projects/**/*.jsonl` (`Skill` tool calls + `/slash` commands) |
-| MCP tool calls | same transcripts (`mcp__server__tool` usage) |
+| Claude Code usage | `~/.claude/projects/**/*.jsonl` (`Skill` tool calls + `/slash` commands + `mcp__server__tool` calls) |
+| Codex usage | `~/.codex/sessions/**/*.jsonl` (`SKILL.md` opens, minus the per-session skill-list injection) |
+| Configured MCP servers | `~/.claude.json` (global + per-project) — joined with call counts to flag never-called servers |
 
 Verdicts: never used → ❌ uninstall candidate · unused >30 days → ⚠️ stale · otherwise ✅ keep.
 
@@ -44,15 +46,16 @@ for ranking, not billing.
 
 ## Roadmap
 
-- `--fix`: emit the actual uninstall/disable commands
-- Adapters for other agents (Codex `~/.codex/sessions`, Gemini CLI, opencode) —
-  the Agent Skills standard (`SKILL.md`) is shared, only log formats differ
+- Adapters for more agents (Gemini CLI, opencode) — the Agent Skills standard
+  (`SKILL.md`) is shared, only log formats differ
 - MCP static cost (tool schema size), not just call counts
 
 ## Limitations
 
 - Usage counts cover whatever transcripts still exist locally; wiped history = zero counts.
 - Skills renamed since last use count as never used.
+- Codex usage counts SKILL.md *mentions* in transcripts (excluding the injected skill list) —
+  an approximation of real invocations, good enough for keep/delete ranking.
 
 ## License
 
