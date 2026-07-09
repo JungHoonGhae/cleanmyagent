@@ -765,17 +765,18 @@ def report(rows, mcp_rows, sort="action"):
         if r["bundle"] or r["origin"] == "dist":
             continue
         if r["cost"] > 200:
-            hints.append((r, r["cost"], "fat description — always loaded; keep trigger "
-                                        "phrases, move detail into the body"))
+            hints.append((r, r["cost"], f"desc {r['cost']:,} tok — paid EVERY session; keep "
+                                        "trigger phrases, move detail into the body"))
         elif r["desc_seps"] > 15:
-            hints.append((r, r["cost"], f"keyword-catalog description ({r['desc_seps']} "
-                                        "separators) — collapse lists into trigger patterns"))
+            hints.append((r, r["cost"], f"desc {r['cost']:,} tok, keyword catalog "
+                                        f"({r['desc_seps']} separators) — collapse into "
+                                        "trigger patterns"))
         if r["body"] > 2500 and not r["refs"]:
-            hints.append((r, r["body"], f"monolithic body (~{r['body']:,} tok, loads whole "
-                                        "on invoke) — split into references/ (loads on demand)"))
+            hints.append((r, r["body"], f"body {r['body']:,} tok — paid on every INVOKE, "
+                                        "whole; split into references/ (loads on demand)"))
         if 0 < r["body"] < r["cost"]:
-            hints.append((r, r["cost"], "description longer than body — inverted: the tax "
-                                        "outweighs the payload"))
+            hints.append((r, r["cost"], f"desc ({r['cost']:,} tok) longer than body "
+                                        f"({r['body']:,} tok) — the tax outweighs the payload"))
     # bundle/plugin anti-pattern: paying a suite-sized tax for a sliver of use
     for bundle, brows in bundles.items():
         used = sum(1 for r in brows if r["uses"] > 0)
@@ -795,7 +796,7 @@ def report(rows, mcp_rows, sort="action"):
 
     hints.sort(key=lambda h: -h[1])
     if hints:
-        lines = [f"{yellow('▲')} {h[0]['name']:<{w}}  {h[1]:>6,} tok  {dim(h[2])}"
+        lines = [f"{yellow('▲')} {h[0]['name']:<{w}}  {dim(h[2])}"
                  for h in hints[:12]]
         if len(hints) > 12:
             lines.append(dim(f"  … {len(hints) - 12} more"))
