@@ -69,14 +69,18 @@ MCP servers carry no install date in `~/.claude.json`, so the report shows
 
 ## Install
 
-One file, Python 3 stdlib only — nothing to build:
+```bash
+brew tap junghoonghae/cleanmyagent
+brew trust junghoonghae/cleanmyagent   # newer Homebrew requires trusting third-party taps
+brew install cleanmyagent
+```
+
+Or, since it's one file of Python 3 stdlib — nothing to build:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JungHoonGhae/cleanmyagent/main/cleanmyagent \
   -o ~/.local/bin/cleanmyagent && chmod +x ~/.local/bin/cleanmyagent
 ```
-
-(or `git clone` and symlink; a Homebrew tap is on the roadmap)
 
 ## Usage
 
