@@ -85,17 +85,59 @@ def bar(frac, width=20):
     return "".join(cells) + "\x1b[0m" + dim("░" * (width - full))
 
 
-def render_boxes(panels, min_inner=0):
-    """btop-style panels: ╭─ title ─╮ borders, ANSI-aware padding, uniform width."""
-    inner = max(max(max([vlen(l) for l in lines] + [vlen(t) + 4])
-                    for t, lines in panels), min_inner)
-    out = []
-    for title, lines in panels:
-        out.append(dim("╭─ ") + bold(title) + dim(" " + "─" * (inner - vlen(title) - 1) + "╮"))
-        for l in lines:
-            out.append(dim("│ ") + l + " " * (inner - vlen(l)) + dim(" │"))
-        out.append(dim("╰" + "─" * (inner + 2) + "╯"))
-    return "\n".join(out)
+def clip(s, n):
+    """ANSI-aware truncation to n visible chars (escape sequences pass through)."""
+    if vlen(s) <= n:
+        return s
+    out, seen, i = [], 0, 0
+    while i < len(s) and seen < n - 1:
+        m = ANSI_RE.match(s, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+        else:
+            out.append(s[i])
+            seen += 1
+            i += 1
+    return "".join(out) + ("\x1b[0m" if COLOR else "") + "…"
+
+
+def render_box(title, lines, inner):
+    """One btop-style panel as a list of equal-width strings."""
+    out = [dim("╭─ ") + bold(clip(title, inner - 2))
+           + dim(" " + "─" * max(0, inner - vlen(title) - 1) + "╮")]
+    for l in lines:
+        l = clip(l, inner)
+        out.append(dim("│ ") + l + " " * (inner - vlen(l)) + dim(" │"))
+    out.append(dim("╰" + "─" * (inner + 2) + "╯"))
+    return out
+
+
+def render_layout(panels, term_w):
+    """btop-style grid: consecutive panels flagged pairable sit side by side
+    when the terminal is wide enough; everything else takes the full width."""
+    blocks, i = [], 0
+    while i < len(panels):
+        title, lines, pairable = panels[i]
+        nat = max([vlen(l) for l in lines] + [vlen(title) + 4])
+        if pairable and i + 1 < len(panels) and panels[i + 1][2]:
+            t2, l2, _ = panels[i + 1]
+            nat2 = max([vlen(l) for l in l2] + [vlen(t2) + 4])
+            if nat + nat2 + 9 <= term_w:
+                left_inner = nat
+                right_inner = term_w - nat - 9
+                a = render_box(title, lines, left_inner)
+                b = render_box(t2, l2, right_inner)
+                blank_a = " " * (left_inner + 4)
+                blank_b = " " * (right_inner + 4)
+                for j in range(max(len(a), len(b))):
+                    blocks.append((a[j] if j < len(a) else blank_a) + " "
+                                  + (b[j] if j < len(b) else blank_b))
+                i += 2
+                continue
+        blocks.extend(render_box(title, lines, term_w - 4))
+        i += 1
+    return "\n".join(blocks)
 
 
 def est_tokens(s):
@@ -605,30 +647,48 @@ def waste_bg(waste):
 
 
 def tax_map(rows, width):
-    """treemap ribbon at group granularity (150 skills is mush; ~12 groups read):
-    width ∝ group's tokens per session, color = share of that spend that is
-    never-used waste. Two rows: name on top, tokens + waste%% below."""
+    """strip treemap at group granularity (150 skills is mush; ~12 groups read):
+    groups flow into 2-3 strips of 3-row blocks — area ∝ tokens per session,
+    color = share of that spend that is never-used waste."""
     groups = {}
     for r in rows:
         groups.setdefault(r["bundle"] or "standalone", []).append(r)
-    segs = []  # (label, cost, waste_frac)
+    segs = []  # (label, cost, waste_frac, used, total_skills)
     for gname, rs in groups.items():
         cost = sum(r["cost"] for r in rs)
         dead = sum(r["cost"] for r in rs if r["uses"] == 0)
-        segs.append((gname.replace("plugin:", ""), cost, dead / cost if cost else 0))
+        segs.append((gname.replace("plugin:", ""), cost, dead / cost if cost else 0,
+                     sum(1 for r in rs if r["uses"] > 0), len(rs)))
     segs.sort(key=lambda s: -s[1])
     total = sum(s[1] for s in segs) or 1
-    avail = width - (len(segs) - 1)  # 1-cell gaps as boundaries
-    top, bottom = [], []
-    for label, cost, waste in segs:
-        n = max(6, round(cost / total * avail))
-        bg = waste_bg(waste)
-        top.append(f"\x1b[30;1;{bg}m{(' ' + label)[:n].ljust(n)}\x1b[0m")
-        info = f" {cost:,}tk {waste:.0%}✗"
-        bottom.append(f"\x1b[30;{bg}m{info[:n].ljust(n)}\x1b[0m")
-    return [" ".join(top), " ".join(bottom), "",
-            dim("width ∝ tokens/session · color = never-used share "
-                "(green all earning → red all waste)")]
+
+    # greedy strip packing: each strip holds ~equal token mass
+    nstrips = 3 if len(segs) > 8 else 2 if len(segs) > 3 else 1
+    target, strips, cur, acc = total / nstrips, [], [], 0
+    for s in segs:
+        cur.append(s)
+        acc += s[1]
+        if acc >= target and len(strips) < nstrips - 1:
+            strips.append(cur)
+            cur, acc = [], 0
+    if cur:
+        strips.append(cur)
+
+    lines = []
+    for strip in strips:
+        stotal = sum(s[1] for s in strip) or 1
+        avail = width - (len(strip) - 1)
+        widths = [max(8, round(c / stotal * avail)) for _, c, *_ in strip]
+        row_name, row_tok, row_use = [], [], []
+        for (label, cost, waste, used, n_skills), n in zip(strip, widths):
+            bg = waste_bg(waste)
+            row_name.append(f"\x1b[30;1;{bg}m{(' ' + label)[:n].ljust(n)}\x1b[0m")
+            row_tok.append(f"\x1b[30;{bg}m{(' %s tok · %.0f%%✗' % (format(cost, ','), waste * 100))[:n].ljust(n)}\x1b[0m")
+            row_use.append(f"\x1b[30;{bg}m{(' %d/%d skills used' % (used, n_skills))[:n].ljust(n)}\x1b[0m")
+        lines += [" ".join(row_name), " ".join(row_tok), " ".join(row_use), ""]
+    lines.append(dim("area ∝ tokens/session · color = never-used share "
+                     "(green all earning → red all waste)"))
+    return lines
 
 
 def table_lines(rows, width, max_cost):
@@ -689,10 +749,10 @@ def report(rows, mcp_rows, sort="action"):
         "",
         dim("TOK/SESSION = tokens this skill's description force-loads into"),
         dim("every single session, used or not — that's the context tax"),
-    ])]
+    ], True)]
 
     if COLOR:  # the map is pure color — nothing to show on pipes/NO_COLOR
-        panels.append(("context-tax map", tax_map(rows, term_w - 4)))
+        panels.append(("context-tax map", tax_map(rows, term_w - 4), False))
 
     # design hints: only the description is force-loaded every session; the SKILL.md
     # body loads on invoke, references/ load on demand. Structural anti-patterns:
@@ -746,10 +806,10 @@ def report(rows, mcp_rows, sort="action"):
         lines.append(dim("loading model: description = every session · body = on invoke · "
                          "references/ = on demand"))
         lines.append(dim("run /skill-judge or /skill-creator on the flagged skills to restructure"))
-        panels.append((f"design hints · {len(hints)} structural issues", lines))
+        panels.append((f"design hints · {len(hints)} structural issues", lines, False))
 
     panels.append((f"standalone skills ({len(standalone)})",
-                   [header] + table_lines(standalone, w, max_cost)))
+                   [header] + table_lines(standalone, w, max_cost), False))
 
     for bundle, brows in sorted(bundles.items(), key=lambda kv: -len(kv[1])):
         brows.sort(key=key)
@@ -760,7 +820,7 @@ def report(rows, mcp_rows, sort="action"):
             lines.append(dim("members are kept together — deleting one breaks/reverts on update"))
         lines += ["", header] + table_lines(brows, w, max_cost)
         tag = f" @{market}" if market else ""
-        panels.append((f"{bundle}{tag} · {len(brows)} skills", lines))
+        panels.append((f"{bundle}{tag} · {len(brows)} skills", lines, False))
 
     util = [utilization_line("standalone skills",
                              sum(1 for r in standalone if r["uses"] > 0), len(standalone))]
@@ -769,7 +829,7 @@ def report(rows, mcp_rows, sort="action"):
     if mcp_rows:
         util.append(utilization_line("mcp servers",
                                      sum(1 for r in mcp_rows if r["uses"] > 0), len(mcp_rows)))
-    panels.append(("utilization", util))
+    panels.append(("utilization", util, True))
 
     if mcp_rows:
         lines = []
@@ -783,10 +843,10 @@ def report(rows, mcp_rows, sort="action"):
                              f"{dim(f'{since:>12}')}")
             else:
                 lines.append(f"{red('✗')} {r['server']:<28} {dim('configured, never called')}")
-        panels.append(("mcp servers", lines))
+        panels.append(("mcp servers", lines, True))
 
     print()
-    print(render_boxes(panels, min_inner=term_w - 4))
+    print(render_layout(panels, term_w))
     hint = "sorted by " + bold(sort)
     if INTERACTIVE:
         hint += dim(" · press ") + bold("a") + dim("ction ") + bold("c") + dim("ost ") \
