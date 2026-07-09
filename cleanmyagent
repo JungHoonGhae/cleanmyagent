@@ -276,11 +276,15 @@ def inventory():
         plugins = json.load(open(manifest)).get("plugins", {})
     except (OSError, ValueError):
         plugins = {}
-    try:  # disabled plugins load nothing — their skills are not context tax
-        enabled_map = json.load(open(os.path.join(CLAUDE, "settings.json"))) \
-            .get("enabledPlugins", {})
-    except (OSError, ValueError):
-        enabled_map = {}
+    # disabled plugins load nothing — their skills are not context tax.
+    # state lives in settings.json AND settings.local.json (local wins)
+    enabled_map = {}
+    for fname in ("settings.json", "settings.local.json"):
+        try:
+            enabled_map.update(json.load(open(os.path.join(CLAUDE, fname)))
+                               .get("enabledPlugins", {}))
+        except (OSError, ValueError):
+            pass
     for full_name, installs in plugins.items():
         plugin, _, market = full_name.partition("@")
         enabled = enabled_map.get(full_name, True)
