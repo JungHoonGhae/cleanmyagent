@@ -277,9 +277,10 @@ def inventory():
     except (OSError, ValueError):
         plugins = {}
     # disabled plugins load nothing — their skills are not context tax.
-    # state lives in settings.json AND settings.local.json (local wins)
+    # `claude plugin disable` writes settings.json (verified empirically);
+    # settings.local.json can hold stale entries, so it's only a fallback.
     enabled_map = {}
-    for fname in ("settings.json", "settings.local.json"):
+    for fname in ("settings.local.json", "settings.json"):
         try:
             enabled_map.update(json.load(open(os.path.join(CLAUDE, fname)))
                                .get("enabledPlugins", {}))
