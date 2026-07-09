@@ -49,8 +49,9 @@ green→red gradient on truecolor terminals; `NO_COLOR` and pipes get plain text
 Deleting an installed skill costs a reinstall; deleting one you wrote costs the
 work itself. The ORIGIN column classifies each standalone skill:
 
-- `✎ custom` — has development artifacts (`scripts/`, `evals/`) and no
-  distribution fingerprints → `--fix` comments the command out with `# REVIEW`
+- `✎ custom` — has development artifacts (`scripts/`, `evals/`), or has been
+  edited more than a day after install (installs stay frozen; hand-made skills
+  keep changing) → `--fix` comments the command out with `# REVIEW`
 - `dist` — bundle member, or frontmatter carries distribution fingerprints
   (`version:`, `platforms:`, `license:`, `source:`, …) → safe to arm
 - `?` — can't tell (many installed skills ship bare `name`+`description`
@@ -69,10 +70,15 @@ MCP servers carry no install date in `~/.claude.json`, so the report shows
 ## Usage
 
 ```bash
-./cleanmyagent          # audit report (colors on a tty, NO_COLOR respected)
-./cleanmyagent --json   # machine-readable
-./cleanmyagent --fix    # print cleanup commands — never executes them
+./cleanmyagent              # audit report (colors on a tty, NO_COLOR respected)
+./cleanmyagent --sort cost  # action (default) · cost · uses · installed · last · name
+./cleanmyagent --json       # machine-readable
+./cleanmyagent --fix        # print cleanup commands — never executes them
 ```
+
+On a tty the report stays open btop-style: press `a`/`c`/`u`/`i`/`l`/`n` to
+re-sort by action/cost/uses/installed/last/name instantly (the scan runs only
+once), `q` to quit.
 
 Local-first: reads only local files, no network, no accounts. Python 3 stdlib, zero deps.
 

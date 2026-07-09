@@ -149,6 +149,16 @@ def detect_origin(name, path, fm_keys, bundle):
     d = os.path.dirname(path)
     if any(os.path.isdir(os.path.join(d, s)) for s in CUSTOM_DIRS):
         return "custom"
+    # hand-made skills keep getting edited; installs stay frozen at install time
+    try:
+        st = os.stat(d)
+        born = getattr(st, "st_birthtime", st.st_mtime)
+        newest = max((os.stat(os.path.join(dp, f)).st_mtime
+                      for dp, _, fs in os.walk(d) for f in fs), default=born)
+        if newest > born + 86400:
+            return "custom"
+    except OSError:
+        pass
     return "?"
 
 
@@ -560,12 +570,22 @@ def fmt_installed(iso):
 
 STATUS_ORDER = {"unused": 0, "stale": 1, "new": 2, "bundle": 3, "keep": 3}
 
+# ISO timestamps sort lexically; "" sorts first, so flag empties to keep them last
+SORTS = {
+    # action order: delete candidates (big cost first) → stale → new → keep (most used first)
+    "action": lambda r: (STATUS_ORDER.get(r["status"], 3),
+                         -r["uses"] if r["status"] in ("keep", "bundle") and r["uses"] else 0,
+                         -r["cost"]),
+    "cost": lambda r: -r["cost"],
+    "uses": lambda r: -r["uses"],
+    "installed": lambda r: (r["installed"] == "", r["installed"]),          # oldest first
+    "last": lambda r: (r["last"] == "", [-ord(ch) for ch in r["last"]]),    # most recent first
+    "name": lambda r: r["name"],
+}
+
 
 def sort_key(r):
-    # action order: delete candidates (big cost first) → stale → new → keep (most used first)
-    return (STATUS_ORDER.get(r["status"], 3),
-            -r["uses"] if r["status"] in ("keep", "bundle") and r["uses"] else 0,
-            -r["cost"])
+    return SORTS["action"](r)
 
 
 def table_lines(rows, width, max_cost):
@@ -588,8 +608,9 @@ def utilization_line(label, used, total, width=24):
     return f"{label:<{width}} {used:>4}/{total:<4} {bar(pct, 16)} {pct:>4.0%}"
 
 
-def report(rows, mcp_rows):
-    standalone = sorted([r for r in rows if not r["bundle"]], key=sort_key)
+def report(rows, mcp_rows, sort="action"):
+    key = SORTS.get(sort, SORTS["action"])
+    standalone = sorted([r for r in rows if not r["bundle"]], key=key)
     bundles = {}
     for r in rows:
         if r["bundle"]:
@@ -625,7 +646,7 @@ def report(rows, mcp_rows):
                    [header] + table_lines(standalone, w, max_cost)))
 
     for bundle, brows in sorted(bundles.items(), key=lambda kv: -len(kv[1])):
-        brows.sort(key=sort_key)
+        brows.sort(key=key)
         used = sum(1 for r in brows if r["uses"] > 0)
         market = next((r["marketplace"] for r in brows if r.get("marketplace")), "")
         lines = [utilization_line("suite utilization", used, len(brows))]
@@ -658,11 +679,50 @@ def report(rows, mcp_rows):
 
     print()
     print(render_boxes(panels))
-    print(dim("run with ") + bold("--fix") + dim(" to print cleanup commands (nothing is executed)") + "\n")
+    hint = "sorted by " + bold(sort)
+    if INTERACTIVE:
+        hint += dim(" · press ") + bold("a") + dim("ction ") + bold("c") + dim("ost ") \
+             + bold("u") + dim("ses ") + bold("i") + dim("nstalled ") + bold("l") + dim("ast ") \
+             + bold("n") + dim("ame · ") + bold("q") + dim(" quit")
+    print(dim("run with ") + bold("--fix") + dim(" to print cleanup commands (nothing is executed)"))
+    print(hint + "\n")
+
+
+SORT_KEYS = {"a": "action", "c": "cost", "u": "uses", "i": "installed", "l": "last", "n": "name"}
+INTERACTIVE = False
+
+
+def interactive_loop(rows, mcp_rows, sort):
+    # btop-style: one keypress → instant re-sort (data is already in memory)
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    while True:
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            ch = sys.stdin.read(1).lower()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if ch in ("q", "\x03", "\x04"):
+            return
+        if ch in SORT_KEYS:
+            sort = SORT_KEYS[ch]
+            sys.stdout.write("\x1b[2J\x1b[H")
+            report(rows, mcp_rows, sort)
 
 
 def main():
-    argv = set(sys.argv[1:])
+    global INTERACTIVE
+    args = sys.argv[1:]
+    sort = "action"
+    for i, a in enumerate(args):
+        if a.startswith("--sort"):
+            sort = a.split("=", 1)[1] if "=" in a else \
+                   (args[i + 1] if i + 1 < len(args) else "action")
+            if sort not in SORTS:
+                sys.exit(f"unknown sort '{sort}' — one of: {', '.join(SORTS)}")
+
     inv = inventory()
     skill_use, mcp_use = usage()
     rows = build_rows(inv, skill_use)
@@ -673,15 +733,21 @@ def main():
     mcp_rows = [{"server": k, "uses": n, "first": ("" if f == "9" else f), "last": t}
                 for k, (n, f, t) in sorted(mcp_use.items(), key=lambda kv: -kv[1][0])]
 
-    if "--fix" in argv:
+    if "--fix" in args:
         for cmd in fix_commands(rows, mcp_rows):
             print(cmd)
-    elif "--json" in argv:
+    elif "--json" in args:
         json.dump({"skills": rows, "mcp": mcp_rows}, sys.stdout,
                   ensure_ascii=False, indent=2)
         print()
     else:
-        report(rows, mcp_rows)
+        INTERACTIVE = sys.stdout.isatty() and sys.stdin.isatty()
+        report(rows, mcp_rows, sort)
+        if INTERACTIVE:
+            try:
+                interactive_loop(rows, mcp_rows, sort)
+            except (ImportError, OSError, KeyboardInterrupt):
+                pass
 
 
 if __name__ == "__main__":
