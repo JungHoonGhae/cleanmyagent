@@ -9,35 +9,40 @@ whether it ever triggers or not. That's context tax. This tool makes it visible 
 across **Claude Code, Codex, opencode, Gemini CLI, OpenClaw, and Hermes Agent** at once.
 
 ```
-cleanmyagent · context-tax audit · 2026-07-09
-agents scanned: claude-code · codex · opencode · gemini · openclaw · hermes
-
-CONTEXT TAX
-  every session      ████████████████████  ~10,315 tok of skill descriptions
-  never-used share   ██████████████░░░░░░  ~6,986 tok (68%) buys you nothing
-
-STANDALONE SKILLS (34)
-  SKILL                          COST  INSTALLED   USES      LAST  VERDICT
-  utm-macos-vm                    199        27d      ·         —  ✗ unused
-  brandkit                        118        12d      ·         —  ◦ new (12d)
-  humanizer                       140       109d      9    1d ago  ✓ keep
-  figma-diff                      133       113d      2   87d ago  ◌ stale 87d
-  ...
-
-GSTACK (56 skills, managed as a suite)             ███░░░░░░░░░ 12/56 used
-PLUGIN:VERCEL @claude-plugins-official (27 skills) ░░░░░░░░░░░░  1/27 used
-PLUGIN:SUPERPOWERS @claude-plugins-official (14)   ██████░░░░░░  7/14 used
-PLUGIN:ATLASSIAN @claude-plugins-official (6)      ░░░░░░░░░░░░  0/6 used
-
-UTILIZATION
-  standalone skills   15/32   ████████░░░░░░░░  47%
-  gstack              12/56   ███░░░░░░░░░░░░░  21%
-  mcp servers          7/8    ██████████████░░  88%
-
-MCP SERVERS
-  ✓ pencil        343 calls   8d ago
-  ✗ paper         configured, never called
+╭─ cleanmyagent · 2026-07-09 ────────────────────────────────────────────╮
+│ agents  claude-code · codex · opencode · gemini · openclaw · hermes    │
+│                                                                        │
+│ context tax / session  ████████████████████████████ ~10,398 tok        │
+│ never-used share       ███████████████████░░░░░░░░░ ~6,964 tok (67%)   │
+╰────────────────────────────────────────────────────────────────────────╯
+╭─ standalone skills (34) ───────────────────────────────────────────────╮
+│ SKILL                     COST  INSTALLED   USES      LAST  VERDICT    │
+│ utm-macos-vm               199        27d      ·         —  ✗ unused   │
+│ figma-diff                 133       113d      2   87d ago  ◌ stale 87d│
+│ brandkit                   118        12d      ·         —  ◦ new (12d)│
+│ intelliantech              405       115d    154     today  ✓ keep     │
+│ ...                                                                    │
+╰────────────────────────────────────────────────────────────────────────╯
+╭─ gstack · 56 skills ───────────────────────────────────────────────────╮
+│ suite utilization         12/56   ███░░░░░░░░░░░░░  21%                │
+│ members are kept together — deleting one breaks/reverts on update      │
+│ ...                                                                    │
+╰────────────────────────────────────────────────────────────────────────╯
+╭─ utilization ──────────────────────────────────────────────────────────╮
+│ standalone skills         15/34   ███████░░░░░░░░░  44%                │
+│ gstack                    12/56   ███░░░░░░░░░░░░░  21%                │
+│ plugin:vercel              1/27   █░░░░░░░░░░░░░░░   4%                │
+│ mcp servers                7/8    ██████████████░░  88%                │
+╰────────────────────────────────────────────────────────────────────────╯
+╭─ mcp servers ──────────────────────────────────────────────────────────╮
+│ ✓ pencil                    343 calls    8d ago                        │
+│ ✗ paper                     configured, never called                   │
+╰────────────────────────────────────────────────────────────────────────╯
 ```
+
+Rows are sorted by action priority: `✗ unused` (biggest context win first) →
+`◌ stale` → `◦ new` → `✓ keep` (most used first). Meters use a btop-style
+green→red gradient on truecolor terminals; `NO_COLOR` and pipes get plain text.
 
 ## Usage
 

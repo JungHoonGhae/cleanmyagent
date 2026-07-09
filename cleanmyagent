@@ -60,9 +60,38 @@ def yellow(s): return c("33", s)
 def cyan(s): return c("36", s)
 
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def vlen(s):
+    return len(ANSI_RE.sub("", s))
+
+
 def bar(frac, width=20):
-    full = round(max(0.0, min(1.0, frac)) * width)
-    return c("32" if frac >= 0.6 else "33" if frac >= 0.3 else "31", "█" * full) + dim("░" * (width - full))
+    # btop-style meter: per-cell green→yellow→red gradient across the bar
+    frac = max(0.0, min(1.0, frac))
+    full = round(frac * width)
+    if not COLOR:
+        return "█" * full + "░" * (width - full)
+    cells = []
+    for i in range(full):
+        t = i / max(width - 1, 1)
+        r, g = (int(2 * t * 255), 255) if t < 0.5 else (255, int(2 * (1 - t) * 255))
+        cells.append(f"\x1b[38;2;{r};{g};70m█")
+    return "".join(cells) + "\x1b[0m" + dim("░" * (width - full))
+
+
+def render_boxes(panels):
+    """btop-style panels: ╭─ title ─╮ borders, ANSI-aware padding, uniform width."""
+    inner = max(max([vlen(l) for l in lines] + [vlen(t) + 4])
+                for t, lines in panels)
+    out = []
+    for title, lines in panels:
+        out.append(dim("╭─ ") + bold(title) + dim(" " + "─" * (inner - vlen(title) - 1) + "╮"))
+        for l in lines:
+            out.append(dim("│ ") + l + " " * (inner - vlen(l)) + dim(" │"))
+        out.append(dim("╰" + "─" * (inner + 2) + "╯"))
+    return "\n".join(out)
 
 
 def est_tokens(s):
@@ -437,25 +466,35 @@ def fmt_installed(iso):
     return "today" if d == 0 else f"{d}d" if d < 365 else f"{d // 365}y{d % 365 // 30}m"
 
 
-def print_table(rows, width):
+STATUS_ORDER = {"unused": 0, "stale": 1, "new": 2, "bundle": 3, "keep": 3}
+
+
+def sort_key(r):
+    # action order: delete candidates (big cost first) → stale → new → keep (most used first)
+    return (STATUS_ORDER.get(r["status"], 3),
+            -r["uses"] if r["status"] in ("keep", "bundle") and r["uses"] else 0,
+            -r["cost"])
+
+
+def table_lines(rows, width):
+    lines = []
     for r in rows:
         paint = VERDICT_PAINT[r["status"]]
         name = f"{r['name']:<{width}}"
-        line = (f"  {name if r['status'] != 'unused' else dim(name)}  "
-                f"{r['cost']:>5}  {fmt_installed(r['installed']):>9}  "
-                f"{r['uses'] if r['uses'] else '·':>5}  "
-                f"{fmt_last(r['last']):>8}  {paint(r['verdict'])}")
-        print(line)
+        lines.append(f"{name if r['status'] != 'unused' else dim(name)}  "
+                     f"{r['cost']:>5}  {fmt_installed(r['installed']):>9}  "
+                     f"{r['uses'] if r['uses'] else '·':>5}  "
+                     f"{fmt_last(r['last']):>8}  {paint(r['verdict']):<14}")
+    return lines
 
 
 def utilization_line(label, used, total, width=24):
     pct = used / total if total else 0
-    return (f"  {label:<{width}} {used:>4}/{total:<4} {bar(pct, 16)} {pct:>4.0%}")
+    return f"{label:<{width}} {used:>4}/{total:<4} {bar(pct, 16)} {pct:>4.0%}"
 
 
 def report(rows, mcp_rows):
-    standalone = sorted([r for r in rows if not r["bundle"]],
-                        key=lambda r: (r["uses"] > 0, -r["cost"]))
+    standalone = sorted([r for r in rows if not r["bundle"]], key=sort_key)
     bundles = {}
     for r in rows:
         if r["bundle"]:
@@ -464,62 +503,60 @@ def report(rows, mcp_rows):
     total = sum(r["cost"] for r in rows)
     dead = [r for r in rows if r["uses"] == 0]
     dead_cost = sum(r["cost"] for r in dead)
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    print(f"\n{bold('cleanmyagent')} {dim('· context-tax audit ·')} {dim(today)}")
     agents = ["claude-code" if os.path.isdir(os.path.join(CLAUDE, "projects")) else None,
               "codex" if os.path.isdir(os.path.join(CODEX, "sessions")) else None,
               "opencode" if os.path.isfile(OPENCODE_DB) else None,
               "gemini" if os.path.isdir(GEMINI) else None,
               "openclaw" if os.path.isdir(OPENCLAW) else None,
               "hermes" if os.path.isdir(HERMES) else None]
-    print(dim("agents scanned: " + " · ".join(a for a in agents if a)))
-
-    print(f"\n{bold('CONTEXT TAX')}")
-    print(f"  every session      {bar(1.0)}  ~{total:,} tok of skill descriptions")
-    frac = dead_cost / total if total else 0
-    print(f"  never-used share   {bar(frac)}  ~{dead_cost:,} tok "
-          f"({frac:.0%}) buys you nothing")
 
     w = max(max((len(r["name"]) for r in rows), default=10), 10)
-    header = (f"  {'SKILL':<{w}}  {'COST':>5}  {'INSTALLED':>9}  "
-              f"{'USES':>5}  {'LAST':>8}  VERDICT")
+    header = dim(f"{'SKILL':<{w}}  {'COST':>5}  {'INSTALLED':>9}  "
+                 f"{'USES':>5}  {'LAST':>8}  {'VERDICT':<14}")
 
-    print(f"\n{bold('STANDALONE SKILLS')} {dim(f'({len(standalone)})')}")
-    print(dim(header))
-    print_table(standalone, w)
+    frac = dead_cost / total if total else 0
+    panels = [(f"cleanmyagent · {datetime.now().strftime('%Y-%m-%d')}", [
+        dim("agents  ") + " · ".join(a for a in agents if a),
+        "",
+        f"{'context tax / session':<22} {bar(1.0, 28)} ~{total:,} tok",
+        f"{'never-used share':<22} {bar(frac, 28)} ~{dead_cost:,} tok ({frac:.0%})",
+    ])]
+
+    panels.append((f"standalone skills ({len(standalone)})",
+                   [header] + table_lines(standalone, w)))
 
     for bundle, brows in sorted(bundles.items(), key=lambda kv: -len(kv[1])):
-        brows.sort(key=lambda r: (r["uses"] > 0, -r["cost"]))
+        brows.sort(key=sort_key)
         used = sum(1 for r in brows if r["uses"] > 0)
         market = next((r["marketplace"] for r in brows if r.get("marketplace")), "")
-        tag = dim(f" @{market}") if market else ""
-        pct = used / len(brows)
-        print(f"\n{bold(bundle.upper())}{tag} {dim(f'({len(brows)} skills, managed as a suite)')}"
-              f"  {bar(pct, 12)} {used}/{len(brows)} used")
-        print_table(brows, w)
-        if 0 < used:
-            print(dim("  ↳ bundle in use — members are kept together; "
-                      "individual deletion breaks/reverts on update"))
+        lines = [utilization_line("suite utilization", used, len(brows))]
+        if used:
+            lines.append(dim("members are kept together — deleting one breaks/reverts on update"))
+        lines += ["", header] + table_lines(brows, w)
+        tag = f" @{market}" if market else ""
+        panels.append((f"{bundle}{tag} · {len(brows)} skills", lines))
 
-    print(f"\n{bold('UTILIZATION')}")
-    su = sum(1 for r in standalone if r["uses"] > 0)
-    print(utilization_line("standalone skills", su, len(standalone)))
+    util = [utilization_line("standalone skills",
+                             sum(1 for r in standalone if r["uses"] > 0), len(standalone))]
     for bundle, brows in sorted(bundles.items(), key=lambda kv: -len(kv[1])):
-        print(utilization_line(bundle, sum(1 for r in brows if r["uses"] > 0), len(brows)))
-    mu = sum(1 for r in mcp_rows if r["uses"] > 0)
+        util.append(utilization_line(bundle, sum(1 for r in brows if r["uses"] > 0), len(brows)))
     if mcp_rows:
-        print(utilization_line("mcp servers", mu, len(mcp_rows)))
+        util.append(utilization_line("mcp servers",
+                                     sum(1 for r in mcp_rows if r["uses"] > 0), len(mcp_rows)))
+    panels.append(("utilization", util))
 
     if mcp_rows:
-        print(f"\n{bold('MCP SERVERS')} {dim('(calls seen in transcripts)')}")
+        lines = []
         for r in mcp_rows:
             if r["uses"]:
-                print(f"  {green('✓')} {r['server']:<28} {r['uses']:>5} calls  {fmt_last(r['last']):>8}")
+                lines.append(f"{green('✓')} {r['server']:<28} {r['uses']:>5} calls  {fmt_last(r['last']):>8}")
             else:
-                print(f"  {red('✗')} {r['server']:<28} {dim('configured, never called')}")
+                lines.append(f"{red('✗')} {r['server']:<28} {dim('configured, never called')}")
+        panels.append(("mcp servers", lines))
 
-    print(f"\n{dim('run with')} {bold('--fix')} {dim('to print cleanup commands (nothing is executed)')}\n")
+    print()
+    print(render_boxes(panels))
+    print(dim("run with ") + bold("--fix") + dim(" to print cleanup commands (nothing is executed)") + "\n")
 
 
 def main():
@@ -527,7 +564,7 @@ def main():
     inv = inventory()
     skill_use, mcp_use = usage()
     rows = build_rows(inv, skill_use)
-    rows.sort(key=lambda r: (r["uses"] > 0, -r["cost"]))
+    rows.sort(key=sort_key)
 
     for s in configured_mcp():
         mcp_use.setdefault(s, (0, ""))
