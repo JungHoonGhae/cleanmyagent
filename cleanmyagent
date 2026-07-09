@@ -353,54 +353,139 @@ def bump(d, key, ts):
     d[key] = (cnt + 1, max(last, ts or ""))
 
 
-def grep_lines(patterns, root, include="*.jsonl"):
-    """Yield matching lines via grep — transcripts are hundreds of MB, let C scan."""
-    if not os.path.isdir(root):
-        return
-    cmd = ["grep", "-rh", f"--include={include}"]
-    for p in patterns:
-        cmd += ["-e", p]
-    cmd.append(root)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            text=True, errors="replace")
-    yield from proc.stdout
-    proc.wait()
+# ---- incremental cache: transcripts are append-mostly, so per-file results keyed
+# by (mtime, size) survive across runs; only changed/new files get re-grepped.
+CACHE_FILE = os.path.expanduser("~/.cache/cleanmyagent/usage.json")
+CACHE_V = 1  # bump when regexes/format change — invalidates everything
+NO_CACHE = False
 
 
-def usage_claude(skills, mcp):
-    for line in grep_lines(['"name":"Skill"', "command-name", '"name":"mcp__'],
-                           os.path.join(CLAUDE, "projects")):
+def load_cache():
+    if NO_CACHE:
+        return {"v": CACHE_V}
+    try:
+        c = json.load(open(CACHE_FILE))
+        if c.get("v") == CACHE_V:
+            return c
+    except (OSError, ValueError):
+        pass
+    return {"v": CACHE_V}
+
+
+def save_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        tmp = CACHE_FILE + ".tmp"
+        json.dump(cache, open(tmp, "w"))
+        os.replace(tmp, CACHE_FILE)
+    except OSError:
+        pass  # cache is an optimization, never a failure
+
+
+def sync_entries(entries, root):
+    """Refresh the per-file cache table for root; return paths needing a scan."""
+    stale, live = [], set()
+    for dp, _, fs in os.walk(root):
+        for f in fs:
+            if not f.endswith(".jsonl"):
+                continue
+            p = os.path.join(dp, f)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            live.add(p)
+            e = entries.get(p)
+            if not e or e["mt"] != st.st_mtime or e["sz"] != st.st_size:
+                entries[p] = {"mt": st.st_mtime, "sz": st.st_size}
+                stale.append(p)
+    for p in list(entries):  # transcripts deleted on disk leave the cache too
+        if p not in live:
+            del entries[p]
+    return stale
+
+
+def grep_files(patterns, paths):
+    """Yield '-H'-prefixed matching lines for the given files, chunked."""
+    for i in range(0, len(paths), 400):
+        cmd = ["grep", "-H"]
+        for p in patterns:
+            cmd += ["-e", p]
+        proc = subprocess.Popen(cmd + paths[i:i + 400], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, errors="replace")
+        yield from proc.stdout
+        proc.wait()
+
+
+def split_hit(line):
+    """(path, matched line) — paths end in .jsonl so the ':' split is unambiguous."""
+    path, sep, rest = line.partition(".jsonl:")
+    return (path + ".jsonl", rest) if sep else (None, line)
+
+
+def usage_claude(skills, mcp, cache):
+    entries = cache.setdefault("claude", {})
+    stale = sync_entries(entries, os.path.join(CLAUDE, "projects"))
+    PROG.stage(f"scanning claude-code transcripts ({len(stale)} changed) …")
+    for line in grep_files(['"name":"Skill"', "command-name", '"name":"mcp__'], stale):
         PROG.n += 1
-        ts_m = TS_RE.search(line)
+        path, rest = split_hit(line)
+        e = entries.get(path)
+        if e is None:
+            continue
+        ts_m = TS_RE.search(rest)
         ts = ts_m.group(1) if ts_m else ""
-        if '"name":"Skill"' in line:
-            m = SKILL_RE.search(line)
+        if '"name":"Skill"' in rest:
+            m = SKILL_RE.search(rest)
             if m:
-                bump(skills, m.group(1), ts)
-        elif "command-name" in line:
-            m = CMD_RE.search(line)
+                s = e.setdefault("sk", {})
+                cnt, last = s.get(m.group(1), (0, ""))
+                s[m.group(1)] = [cnt + 1, max(last, ts)]
+        elif "command-name" in rest:
+            m = CMD_RE.search(rest)
             if m:
-                bump(skills, m.group(1), ts)
-        for m in MCP_RE.finditer(line):
-            key = m.group(1)
-            cnt, first, last, tools = mcp.get(key, (0, "9", "", set()))
-            tools.add(m.group(2))
-            mcp[key] = (cnt + 1, min(first, ts or "9"), max(last, ts or ""), tools)
+                s = e.setdefault("sk", {})
+                cnt, last = s.get(m.group(1), (0, ""))
+                s[m.group(1)] = [cnt + 1, max(last, ts)]
+        for m in MCP_RE.finditer(rest):
+            mm = e.setdefault("mcp", {})
+            cnt, first, last, tools = mm.get(m.group(1), (0, "9", "", []))
+            if m.group(2) not in tools:
+                tools = tools + [m.group(2)]
+            mm[m.group(1)] = [cnt + 1, min(first, ts or "9"), max(last, ts), tools]
+    # merge every cached file (fresh + untouched) into the global tallies
+    for e in entries.values():
+        for name, (cnt, last) in e.get("sk", {}).items():
+            c0, l0 = skills.get(name, (0, ""))
+            skills[name] = (c0 + cnt, max(l0, last))
+        for srv, (cnt, first, last, tools) in e.get("mcp", {}).items():
+            c0, f0, l0, t0 = mcp.get(srv, (0, "9", "", set()))
+            mcp[srv] = (c0 + cnt, min(f0, first), max(l0, last), t0 | set(tools))
 
 
-def usage_skillmd_mentions(skills, root, list_marker):
+def usage_skillmd_mentions(skills, root, list_marker, cache, cache_key):
     # Codex/OpenClaw use a skill by opening its SKILL.md; the per-session
     # skill-list injection (list_marker) is excluded so listing != using.
     # ponytail: mention ≈ use — good enough for keep/delete ranking.
-    for line in grep_lines(["SKILL.md"], root):
+    entries = cache.setdefault(cache_key, {})
+    stale = sync_entries(entries, root)
+    for line in grep_files(["SKILL.md"], stale):
         PROG.n += 1
-        if list_marker in line:
+        path, rest = split_hit(line)
+        e = entries.get(path)
+        if e is None or list_marker in rest:
             continue
-        ts_m = TS_RE.search(line)
+        ts_m = TS_RE.search(rest)
         ts = ts_m.group(1) if ts_m else ""
-        for name in set(CODEX_SKILL_RE.findall(line)):
+        for name in set(CODEX_SKILL_RE.findall(rest)):
             if not name.startswith("."):
-                bump(skills, name, ts)
+                s = e.setdefault("sk", {})
+                cnt, last = s.get(name, (0, ""))
+                s[name] = [cnt + 1, max(last, ts)]
+    for e in entries.values():
+        for name, (cnt, last) in e.get("sk", {}).items():
+            c0, l0 = skills.get(name, (0, ""))
+            skills[name] = (c0 + cnt, max(l0, last))
 
 
 def usage_opencode(skills):
@@ -486,18 +571,22 @@ def usage_gstack(skills):
 
 def usage():
     skills, mcp = {}, {}
+    cache = load_cache()
     for label, fn in (
-            ("claude-code transcripts", lambda: usage_claude(skills, mcp)),
+            ("claude-code transcripts", lambda: usage_claude(skills, mcp, cache)),
             ("codex sessions", lambda: usage_skillmd_mentions(
-                skills, os.path.join(CODEX, "sessions"), "### Available skills")),
+                skills, os.path.join(CODEX, "sessions"), "### Available skills",
+                cache, "codex")),
             ("openclaw sessions", lambda: usage_skillmd_mentions(
-                skills, os.path.join(OPENCLAW, "agents"), "<available_skills>")),
+                skills, os.path.join(OPENCLAW, "agents"), "<available_skills>",
+                cache, "openclaw")),
             ("opencode db", lambda: usage_opencode(skills)),
             ("gemini chats", lambda: usage_gemini(skills)),
             ("hermes db", lambda: usage_hermes(skills)),
             ("gstack analytics", lambda: usage_gstack(skills))):
         PROG.stage(f"scanning {label} …")
         fn()
+    save_cache(cache)
     PROG.done()
     return skills, mcp
 
@@ -953,8 +1042,9 @@ def interactive_loop(rows, mcp_rows, sort):
 
 
 def main():
-    global INTERACTIVE
+    global INTERACTIVE, NO_CACHE
     args = sys.argv[1:]
+    NO_CACHE = "--no-cache" in args
     sort = "action"
     for i, a in enumerate(args):
         if a.startswith("--sort"):

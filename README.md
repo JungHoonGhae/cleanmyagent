@@ -89,7 +89,12 @@ cleanmyagent                # audit report (colors on a tty, NO_COLOR respected)
 cleanmyagent --sort cost    # action (default) · cost · uses · installed · last · name
 cleanmyagent --json         # machine-readable
 cleanmyagent --fix          # print cleanup commands — never executes them
+cleanmyagent --no-cache     # ignore + rebuild the usage cache
 ```
+
+Transcript scanning is incrementally cached (`~/.cache/cleanmyagent/usage.json`,
+keyed by file mtime+size): the first run walks everything (~15s on a 770MB
+history), repeat runs only re-scan changed session files (~0.2s).
 
 On a tty the report stays open btop-style: press `a`/`c`/`u`/`i`/`l`/`n` to
 re-sort by action/cost/uses/installed/last/name instantly (the scan runs only
