@@ -9,12 +9,16 @@ inventory (SKILL.md descriptions = per-session context tax):
   codex     ~/.codex/skills                 (.system builtins excluded)
   opencode  ~/.config/opencode/skill
   gemini    ~/.gemini/skills                + extensions' bundled skills
+  openclaw  ~/.openclaw/skills
+  hermes    ~/.hermes/skills
 
 usage:
   claude    ~/.claude/projects/**/*.jsonl   Skill tool calls, /slash commands, mcp__ calls
   codex     ~/.codex/sessions/**/*.jsonl    SKILL.md opens (skill-list injection excluded)
   opencode  ~/.local/share/opencode/opencode.db   part rows: tool=skill
   gemini    ~/.gemini/tmp/**/chats/*.json   activate_skill function calls
+  openclaw  ~/.openclaw/agents/**/sessions/*.jsonl   SKILL.md opens (<available_skills> excluded)
+  hermes    ~/.hermes/state.db              skill_view tool calls
 
 Skills that ship as part of a managed bundle (Claude plugins, the gstack suite,
 Gemini extensions) are judged as a bundle: deleting individual members breaks the
@@ -36,6 +40,8 @@ AGENTS = os.path.expanduser("~/.agents")
 OPENCODE_CFG = os.path.expanduser("~/.config/opencode")
 OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 GEMINI = os.path.expanduser("~/.gemini")
+OPENCLAW = os.path.expanduser("~/.openclaw")
+HERMES = os.path.expanduser("~/.hermes")
 STALE_DAYS = 30
 
 COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -125,6 +131,8 @@ def inventory():
     scan_skill_dir(inv, os.path.join(OPENCODE_CFG, "skill"), "opencode")
     scan_skill_dir(inv, os.path.join(OPENCODE_CFG, "skills"), "opencode")
     scan_skill_dir(inv, os.path.join(GEMINI, "skills"), "gemini")
+    scan_skill_dir(inv, os.path.join(OPENCLAW, "skills"), "openclaw")
+    scan_skill_dir(inv, os.path.join(HERMES, "skills"), "hermes")
 
     # gemini extensions may bundle skills
     for sdir in glob.glob(os.path.join(GEMINI, "extensions", "*", "skills")):
@@ -199,12 +207,12 @@ def usage_claude(skills, mcp):
             bump(mcp, m.group(1)[len("mcp__"):], ts)
 
 
-def usage_codex(skills):
-    # Codex uses a skill by opening its SKILL.md; the per-session skill-list
-    # injection ("### Available skills") is excluded so listing != using.
+def usage_skillmd_mentions(skills, root, list_marker):
+    # Codex/OpenClaw use a skill by opening its SKILL.md; the per-session
+    # skill-list injection (list_marker) is excluded so listing != using.
     # ponytail: mention ≈ use — good enough for keep/delete ranking.
-    for line in grep_lines(["SKILL.md"], os.path.join(CODEX, "sessions")):
-        if "### Available skills" in line:
+    for line in grep_lines(["SKILL.md"], root):
+        if list_marker in line:
             continue
         ts_m = TS_RE.search(line)
         ts = ts_m.group(1) if ts_m else ""
@@ -249,6 +257,37 @@ def usage_gemini(skills):
             bump(skills, m.group(1), mtime)
 
 
+def usage_hermes(skills):
+    # Hermes Agent logs tool calls in state.db; skills are used via skill_view {name}
+    db_path = os.path.join(HERMES, "state.db")
+    if not os.path.isfile(db_path):
+        return
+    try:
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = db.execute(
+            "SELECT tool_calls, timestamp FROM messages "
+            "WHERE tool_calls LIKE '%skill_view%'").fetchall()
+        db.close()
+    except sqlite3.Error:
+        return
+    for tool_calls, epoch in rows:
+        try:
+            calls = json.loads(tool_calls)
+        except (ValueError, TypeError):
+            continue
+        ts = datetime.fromtimestamp(epoch or 0, timezone.utc).isoformat()
+        for call in calls:
+            fn = call.get("function", {})
+            if fn.get("name") != "skill_view":
+                continue
+            try:
+                name = json.loads(fn.get("arguments", "{}")).get("name")
+            except ValueError:
+                continue
+            if name:
+                bump(skills, name, ts)
+
+
 def usage_gstack(skills):
     # gstack keeps its own invocation log — most reliable source for its suite
     log = os.path.expanduser("~/.gstack/analytics/skill-usage.jsonl")
@@ -266,9 +305,11 @@ def usage_gstack(skills):
 def usage():
     skills, mcp = {}, {}
     usage_claude(skills, mcp)
-    usage_codex(skills)
+    usage_skillmd_mentions(skills, os.path.join(CODEX, "sessions"), "### Available skills")
+    usage_skillmd_mentions(skills, os.path.join(OPENCLAW, "agents"), "<available_skills>")
     usage_opencode(skills)
     usage_gemini(skills)
+    usage_hermes(skills)
     usage_gstack(skills)
     return skills, mcp
 
@@ -342,7 +383,8 @@ def fix_commands(rows, mcp_rows):
             # a skill can live in several skill dirs (inventory dedupes) — rm every copy
             for base in (os.path.join(CLAUDE, "skills"), os.path.join(AGENTS, "skills"),
                          os.path.join(CODEX, "skills"), os.path.join(OPENCODE_CFG, "skill"),
-                         os.path.join(OPENCODE_CFG, "skills"), os.path.join(GEMINI, "skills")):
+                         os.path.join(OPENCODE_CFG, "skills"), os.path.join(GEMINI, "skills"),
+                         os.path.join(OPENCLAW, "skills"), os.path.join(HERMES, "skills")):
                 d = os.path.join(base, r["name"])
                 if os.path.isdir(d):
                     cmds.append(f"rm -rf {d}")
@@ -402,7 +444,9 @@ def report(rows, mcp_rows):
     agents = ["claude-code" if os.path.isdir(os.path.join(CLAUDE, "projects")) else None,
               "codex" if os.path.isdir(os.path.join(CODEX, "sessions")) else None,
               "opencode" if os.path.isfile(OPENCODE_DB) else None,
-              "gemini" if os.path.isdir(GEMINI) else None]
+              "gemini" if os.path.isdir(GEMINI) else None,
+              "openclaw" if os.path.isdir(OPENCLAW) else None,
+              "hermes" if os.path.isdir(HERMES) else None]
     print(dim("agents scanned: " + " · ".join(a for a in agents if a)))
 
     print(f"\n{bold('CONTEXT TAX')}")

@@ -6,11 +6,11 @@ then tell you what to delete.
 
 Every installed skill's description sits in your context window every single turn,
 whether it ever triggers or not. That's context tax. This tool makes it visible —
-across **Claude Code, Codex, opencode, and Gemini CLI** at once.
+across **Claude Code, Codex, opencode, Gemini CLI, OpenClaw, and Hermes Agent** at once.
 
 ```
 cleanmyagent · context-tax audit · 2026-07-09
-agents scanned: claude-code · codex · opencode · gemini
+agents scanned: claude-code · codex · opencode · gemini · openclaw · hermes
 
 CONTEXT TAX
   every session      ████████████████████  ~10,315 tok of skill descriptions
@@ -57,6 +57,8 @@ Local-first: reads only local files, no network, no accounts. Python 3 stdlib, z
 | Codex | `~/.codex/skills` (`.system` builtins excluded) | `~/.codex/sessions/**/*.jsonl` — `SKILL.md` opens |
 | opencode | `~/.config/opencode/skill` | `~/.local/share/opencode/opencode.db` — `skill` tool calls |
 | Gemini CLI | `~/.gemini/skills` + extensions' bundled skills | `~/.gemini/tmp/**/chats/*.json` — `activate_skill` calls |
+| OpenClaw | `~/.openclaw/skills` | `~/.openclaw/agents/**/sessions/*.jsonl` — `SKILL.md` opens |
+| Hermes Agent | `~/.hermes/skills` | `~/.hermes/state.db` — `skill_view` tool calls |
 | gstack | suite detected from its repo at `<skills>/gstack` | `~/.gstack/analytics/skill-usage.jsonl` |
 | MCP (Claude Code) | configured servers in `~/.claude.json` | call counts from transcripts |
 
@@ -81,8 +83,8 @@ for ranking, not billing.
 
 - Usage counts cover whatever transcripts still exist locally; wiped history = zero counts.
 - Skills renamed since last use count as never used.
-- Codex usage counts `SKILL.md` *mentions* (excluding the injected skill list) —
-  an approximation, good enough for keep/delete ranking.
+- Codex and OpenClaw usage counts `SKILL.md` *mentions* (excluding the injected
+  skill list) — an approximation, good enough for keep/delete ranking.
 - Gemini usage parsing is based on Gemini CLI's session format (`activate_skill`);
   built from source inspection of v0.33.
 
