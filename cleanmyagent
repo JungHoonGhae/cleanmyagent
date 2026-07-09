@@ -113,31 +113,22 @@ def render_box(title, lines, inner):
     return out
 
 
-def render_layout(panels, term_w):
-    """btop-style grid: consecutive panels flagged pairable sit side by side
-    when the terminal is wide enough; everything else takes the full width."""
-    blocks, i = [], 0
-    while i < len(panels):
-        title, lines, pairable = panels[i]
-        nat = max([vlen(l) for l in lines] + [vlen(title) + 4])
-        if pairable and i + 1 < len(panels) and panels[i + 1][2]:
-            t2, l2, _ = panels[i + 1]
-            nat2 = max([vlen(l) for l in l2] + [vlen(t2) + 4])
-            if nat + nat2 + 9 <= term_w:
-                left_inner = nat
-                right_inner = term_w - nat - 9
-                a = render_box(title, lines, left_inner)
-                b = render_box(t2, l2, right_inner)
-                blank_a = " " * (left_inner + 4)
-                blank_b = " " * (right_inner + 4)
-                for j in range(max(len(a), len(b))):
-                    blocks.append((a[j] if j < len(a) else blank_a) + " "
-                                  + (b[j] if j < len(b) else blank_b))
-                i += 2
-                continue
-        blocks.extend(render_box(title, lines, term_w - 4))
-        i += 1
-    return "\n".join(blocks)
+SIDE_W = 60  # right sidebar (utilization, mcp) — btop-style fixed column
+
+
+def render_layout(main, side, term_w):
+    """btop-style page: main column left; utilization/mcp in a fixed right
+    sidebar when the terminal is wide enough, stacked below otherwise."""
+    if side and term_w >= 150:
+        main_w = term_w - SIDE_W - 1
+        left = [ln for t, ls in main for ln in render_box(t, ls, main_w - 4)]
+        right = [ln for t, ls in side for ln in render_box(t, ls, SIDE_W - 4)]
+        blank_l, blank_r = " " * main_w, " " * SIDE_W
+        return "\n".join((left[i] if i < len(left) else blank_l) + " "
+                         + (right[i] if i < len(right) else blank_r)
+                         for i in range(max(len(left), len(right))))
+    return "\n".join(ln for t, ls in main + side
+                     for ln in render_box(t, ls, term_w - 4))
 
 
 def est_tokens(s):
@@ -640,10 +631,17 @@ def sort_key(r):
     return SORTS["action"](r)
 
 
+# green → lime → amber → orange → red; piecewise lerp keeps midtones vivid
+WASTE_STOPS = [(34, 160, 84), (132, 176, 60), (233, 158, 38), (238, 108, 46), (225, 62, 62)]
+
+
 def waste_bg(waste):
-    """truecolor bg from green (0% wasted) to red (100% wasted)"""
-    r, g = (int(220 * waste + 30), int(160 * (1 - waste) + 30))
-    return f"48;2;{r};{g};60"
+    x = min(max(waste, 0.0), 1.0) * (len(WASTE_STOPS) - 1)
+    i = min(int(x), len(WASTE_STOPS) - 2)
+    t = x - i
+    a, b = WASTE_STOPS[i], WASTE_STOPS[i + 1]
+    r, g, bl = (int(a[k] + (b[k] - a[k]) * t) for k in range(3))
+    return f"48;2;{r};{g};{bl}"
 
 
 def tax_map(rows, width):
@@ -677,8 +675,23 @@ def tax_map(rows, width):
     lines = []
     for strip in strips:
         stotal = sum(s[1] for s in strip) or 1
-        avail = width - (len(strip) - 1)
-        widths = [max(8, round(c / stotal * avail)) for _, c, *_ in strip]
+        # segments too narrow to label merge into one "+N others" block
+        prov = [round(c / stotal * (width - (len(strip) - 1))) for _, c, *_ in strip]
+        cut = next((i for i, n in enumerate(prov) if n < 16 and i > 0), len(strip))
+        if cut < len(strip) - 1 or (cut < len(strip) and prov[cut] < 16):
+            tail = strip[cut:]
+            tc = sum(s[1] for s in tail) or 1
+            strip = strip[:cut] + [(f"+{len(tail)} others", tc,
+                                    sum(s[1] * s[2] for s in tail) / tc,
+                                    sum(s[3] for s in tail), sum(s[4] for s in tail))]
+        gaps = len(strip) - 1
+        avail = width - gaps
+        stotal = sum(s[1] for s in strip) or 1
+        widths = [max(10, round(c / stotal * avail)) for _, c, *_ in strip]
+        widths[-1] = avail - sum(widths[:-1])  # exact fit, no overflow past the box
+        if widths[-1] < 10 and len(widths) > 1:  # rounding pushed the last one under
+            widths[0] += widths[-1] - 10
+            widths[-1] = 10
         row_name, row_tok, row_use = [], [], []
         for (label, cost, waste, used, n_skills), n in zip(strip, widths):
             bg = waste_bg(waste)
@@ -712,9 +725,9 @@ def utilization_line(label, used, total, width=24):
     return f"{label:<{width}} {used:>4}/{total:<4} {bar(pct, 16)} {pct:>4.0%}"
 
 
-def report(rows, mcp_rows, sort="action"):
+def report(rows, mcp_rows, sort="action", rev=False, full_hints=False):
     key = SORTS.get(sort, SORTS["action"])
-    standalone = sorted([r for r in rows if not r["bundle"]], key=key)
+    standalone = sorted([r for r in rows if not r["bundle"]], key=key, reverse=rev)
     bundles = {}
     for r in rows:
         if r["bundle"]:
@@ -735,7 +748,9 @@ def report(rows, mcp_rows, sort="action"):
     # fixed columns: origin 8 + tok 12 + installed 9 + uses 5 + last 8 + verdict 14
     # + 6 gaps of 2 + box borders 4 = 72
     term_w = shutil.get_terminal_size((120, 24)).columns
-    w = max(18, min(w, term_w - 72))
+    sidebar = term_w >= 150
+    main_w = term_w - SIDE_W - 1 if sidebar else term_w
+    w = max(18, min(w, main_w - 72))
     max_cost = max((r["cost"] for r in rows), default=1) or 1
     header = dim(f"{'SKILL':<{w}}  {'ORIGIN':<8}  {'TOK/SESSION':>12}  {'INSTALLED':>9}  "
                  f"{'USES':>5}  {'LAST':>8}  {'VERDICT':<14}")
@@ -749,10 +764,10 @@ def report(rows, mcp_rows, sort="action"):
         "",
         dim("TOK/SESSION = tokens this skill's description force-loads into"),
         dim("every single session, used or not — that's the context tax"),
-    ], True)]
+    ])]
 
     if COLOR:  # the map is pure color — nothing to show on pipes/NO_COLOR
-        panels.append(("context-tax map", tax_map(rows, term_w - 4), False))
+        panels.append(("context-tax map", tax_map(rows, main_w - 4)))
 
     # design hints: only the description is force-loaded every session; the SKILL.md
     # body loads on invoke, references/ load on demand. Structural anti-patterns:
@@ -801,10 +816,13 @@ def report(rows, mcp_rows, sort="action"):
     hints.sort(key=lambda h: (h[1], -h[2]))
     if hints:
         tag = [cyan("[session]"), dim("[invoke] ")]
+        shown = hints if full_hints else hints[:12]
         lines = [f"{yellow('▲')} {tag[h[1]]} {h[0]['name']:<{w}}  {dim(h[3])}"
-                 for h in hints[:12]]
-        if len(hints) > 12:
-            lines.append(dim(f"  … {len(hints) - 12} more"))
+                 for h in shown]
+        if len(hints) > len(shown):
+            more = dim(f"  … {len(hints) - len(shown)} more")
+            lines.append(more + (dim(" — press ") + bold("h") if INTERACTIVE else
+                                 dim(" — see --json")))
         lines.append("")
         if dist_monoliths:
             lines.append(dim(f"(+{dist_monoliths} distributed skills have monolithic bodies — "
@@ -812,13 +830,13 @@ def report(rows, mcp_rows, sort="action"):
         lines.append(dim("loading model: description = every session · body = on invoke · "
                          "references/ = on demand"))
         lines.append(dim("run /skill-judge or /skill-creator on the flagged skills to restructure"))
-        panels.append((f"design hints · {len(hints)} structural issues", lines, False))
+        panels.append((f"design hints · {len(hints)} structural issues", lines))
 
     panels.append((f"standalone skills ({len(standalone)})",
-                   [header] + table_lines(standalone, w, max_cost), False))
+                   [header] + table_lines(standalone, w, max_cost)))
 
     for bundle, brows in sorted(bundles.items(), key=lambda kv: -len(kv[1])):
-        brows.sort(key=key)
+        brows.sort(key=key, reverse=rev)
         used = sum(1 for r in brows if r["uses"] > 0)
         market = next((r["marketplace"] for r in brows if r.get("marketplace")), "")
         lines = [utilization_line("suite utilization", used, len(brows))]
@@ -826,38 +844,42 @@ def report(rows, mcp_rows, sort="action"):
             lines.append(dim("members are kept together — deleting one breaks/reverts on update"))
         lines += ["", header] + table_lines(brows, w, max_cost)
         tag = f" @{market}" if market else ""
-        panels.append((f"{bundle}{tag} · {len(brows)} skills", lines, False))
+        panels.append((f"{bundle}{tag} · {len(brows)} skills", lines))
 
-    util = [utilization_line("standalone skills",
-                             sum(1 for r in standalone if r["uses"] > 0), len(standalone))]
-    for bundle, brows in sorted(bundles.items(), key=lambda kv: -len(kv[1])):
-        util.append(utilization_line(bundle, sum(1 for r in brows if r["uses"] > 0), len(brows)))
+    # right sidebar: worst utilization first — the offenders float to the top
+    groups = [("standalone skills",
+               sum(1 for r in standalone if r["uses"] > 0), len(standalone))]
+    for bundle, brows in bundles.items():
+        groups.append((bundle, sum(1 for r in brows if r["uses"] > 0), len(brows)))
+    groups.sort(key=lambda g: g[1] / g[2] if g[2] else 0)
+    util = [utilization_line(*g) for g in groups]
     if mcp_rows:
+        util.append("")
         util.append(utilization_line("mcp servers",
                                      sum(1 for r in mcp_rows if r["uses"] > 0), len(mcp_rows)))
-    panels.append(("utilization", util, True))
+    side = [("utilization · worst first", util)]
 
     if mcp_rows:
-        lines = []
+        lines = [dim(f"{'SERVER':<27}{'CALLS':>6} {'TOOLS':>5} {'LAST':>9}")]
         for r in mcp_rows:
             if r["uses"]:
-                # MCP config carries no install date — first call seen is the proxy
-                since = f"since {fmt_installed(r['first'])}" if r["first"] else ""
-                nt = len(r["tools_used"])
-                lines.append(f"{green('✓')} {r['server']:<28} {r['uses']:>5} calls  "
-                             f"{nt:>3} distinct tools  {fmt_last(r['last']):>8}  "
-                             f"{dim(f'{since:>12}')}")
+                lines.append(f"{green('✓')} {clip(r['server'], 25):<25}"
+                             f"{r['uses']:>6} {len(r['tools_used']):>5} "
+                             f"{fmt_last(r['last']):>9}")
             else:
-                lines.append(f"{red('✗')} {r['server']:<28} {dim('configured, never called')}")
-        panels.append(("mcp servers", lines, True))
+                lines.append(f"{red('✗')} {r['server']:<25} {dim('never called')}")
+        lines.append(dim("first call seen ≈ install date (config has none)"))
+        side.append(("mcp servers", lines))
 
     print()
-    print(render_layout(panels, term_w))
-    hint = "sorted by " + bold(sort)
+    print(render_layout(panels, side, term_w))
+    arrow = "↑" if rev else "↓"
+    hint = f"sorted by {bold(sort)} {arrow}"
     if INTERACTIVE:
-        hint += dim(" · press ") + bold("a") + dim("ction ") + bold("c") + dim("ost ") \
+        hint += dim(" · ") + bold("a") + dim("ction ") + bold("c") + dim("ost ") \
              + bold("u") + dim("ses ") + bold("i") + dim("nstalled ") + bold("l") + dim("ast ") \
-             + bold("n") + dim("ame · ") + bold("q") + dim(" quit")
+             + bold("n") + dim("ame · same key = reverse · ") + bold("h") + dim(" all hints · ") \
+             + bold("q") + dim(" quit")
     print(dim("run with ") + bold("--fix") + dim(" to print cleanup commands (nothing is executed)"))
     print(hint + "\n")
 
@@ -867,23 +889,41 @@ INTERACTIVE = False
 
 
 def interactive_loop(rows, mcp_rows, sort):
-    # btop-style: one keypress → instant re-sort (data is already in memory)
+    # btop-style: one keypress → instant re-render (data is already in memory).
+    # Runs in the alternate screen buffer so re-renders leave no ghosting and
+    # quitting restores the shell exactly as it was.
     import termios
     import tty
     fd = sys.stdin.fileno()
-    while True:
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            ch = sys.stdin.read(1).lower()
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        if ch in ("q", "\x03", "\x04"):
-            return
-        if ch in SORT_KEYS:
-            sort = SORT_KEYS[ch]
+    rev, full_hints, in_alt = False, False, False
+    try:
+        while True:
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                ch = sys.stdin.read(1).lower()
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            if ch in ("q", "\x03", "\x04"):
+                return
+            if ch == "h":
+                full_hints = not full_hints
+            elif ch in SORT_KEYS:
+                if SORT_KEYS[ch] == sort:
+                    rev = not rev  # same key again flips the direction
+                else:
+                    sort, rev = SORT_KEYS[ch], False
+            else:
+                continue
+            if not in_alt:
+                sys.stdout.write("\x1b[?1049h")
+                in_alt = True
             sys.stdout.write("\x1b[2J\x1b[H")
-            report(rows, mcp_rows, sort)
+            report(rows, mcp_rows, sort, rev, full_hints)
+    finally:
+        if in_alt:
+            sys.stdout.write("\x1b[?1049l")
+            sys.stdout.flush()
 
 
 def main():
