@@ -8,6 +8,10 @@ Every installed skill's description sits in your context window every single tur
 whether it ever triggers or not. That's context tax. This tool makes it visible —
 across **Claude Code, Codex, opencode, Gemini CLI, OpenClaw, and Hermes Agent** at once.
 
+**Fast**: usage scanning is incrementally cached. Measured on a 770 MB / ~3,000-file
+Claude Code history: first run **14.4 s** (builds the cache) → every run after **0.24 s**
+(only changed session files are re-scanned; results are byte-identical to a full scan).
+
 ```
 ╭─ cleanmyagent · 2026-07-09 ────────────────────────────────────────────╮
 │ agents  claude-code · codex · opencode · gemini · openclaw · hermes    │
