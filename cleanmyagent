@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""cleanmyagent — audit what your coding agent's skills/plugins/MCP actually cost vs. how much you use them.
+
+v0: Claude Code only. Reads local files, no network, no deps.
+  inventory: ~/.claude/skills/*/SKILL.md + ~/.claude/plugins/installed_plugins.json
+  usage:     ~/.claude/projects/**/*.jsonl (Skill tool calls, /slash commands, mcp__ tool calls)
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+CLAUDE = os.path.expanduser(os.environ.get("CLAUDE_HOME", "~/.claude"))
+STALE_DAYS = 30
+
+
+def est_tokens(s):
+    # ponytail: heuristic — ~4 chars/token ascii, ~1.5 chars/token CJK. Good enough for ranking.
+    ascii_n = sum(1 for c in s if ord(c) < 128)
+    return int(ascii_n / 4 + (len(s) - ascii_n) / 1.5)
+
+
+def read_frontmatter_desc(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read(20000)
+    except OSError:
+        return ""
+    m = re.match(r"---\n(.*?)\n---", text, re.S)
+    if not m:
+        return ""
+    fm = m.group(1)
+    dm = re.search(r"^description:\s*(.*(?:\n[ \t]+.*)*)", fm, re.M)
+    return dm.group(1).strip() if dm else ""
+
+
+def inventory():
+    """Return {key: {"source", "cost", "path"}} for every installed skill."""
+    inv = {}
+    # user skills: ~/.claude/skills/<name>/SKILL.md
+    skills_dir = os.path.join(CLAUDE, "skills")
+    if os.path.isdir(skills_dir):
+        for name in sorted(os.listdir(skills_dir)):
+            p = os.path.join(skills_dir, name, "SKILL.md")
+            if os.path.isfile(p):
+                desc = read_frontmatter_desc(p)
+                inv[name] = {"source": "user", "cost": est_tokens(name + desc), "path": p}
+    # plugin skills: installPath/skills/<name>/SKILL.md, invoked as "plugin:name"
+    manifest = os.path.join(CLAUDE, "plugins", "installed_plugins.json")
+    try:
+        plugins = json.load(open(manifest)).get("plugins", {})
+    except (OSError, ValueError):
+        plugins = {}
+    for full_name, installs in plugins.items():
+        plugin = full_name.split("@")[0]
+        paths = {i.get("installPath") for i in installs if i.get("installPath")}
+        for root in paths:
+            sdir = os.path.join(root, "skills")
+            if not os.path.isdir(sdir):
+                continue
+            for name in sorted(os.listdir(sdir)):
+                p = os.path.join(sdir, name, "SKILL.md")
+                if os.path.isfile(p):
+                    key = f"{plugin}:{name}"
+                    if key in inv:
+                        continue
+                    desc = read_frontmatter_desc(p)
+                    inv[key] = {"source": f"plugin:{plugin}", "cost": est_tokens(key + desc), "path": p}
+    return inv
+
+
+SKILL_RE = re.compile(r'"skill"\s*:\s*"([^"]+)"')
+CMD_RE = re.compile(r"<command-name>/?([\w:-]+)</command-name>")
+MCP_RE = re.compile(r'"name"\s*:\s*"(mcp__[A-Za-z0-9_]+?)__')
+TS_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
+
+
+def usage():
+    """Return ({skill_key: (count, last_iso)}, {mcp_server: (count, last_iso)}) from all transcripts."""
+    projects = os.path.join(CLAUDE, "projects")
+    skills, mcp = {}, {}
+    if not os.path.isdir(projects):
+        return skills, mcp
+    # grep prefilter: transcripts are hundreds of MB; let C do the scan.
+    proc = subprocess.Popen(
+        ["grep", "-rh", "--include=*.jsonl",
+         "-e", '"name":"Skill"', "-e", "command-name", "-e", '"name":"mcp__',
+         projects],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+
+    def bump(d, key, ts):
+        cnt, last = d.get(key, (0, ""))
+        d[key] = (cnt + 1, max(last, ts or ""))
+
+    for line in proc.stdout:
+        ts_m = TS_RE.search(line)
+        ts = ts_m.group(1) if ts_m else ""
+        if '"name":"Skill"' in line:
+            m = SKILL_RE.search(line)
+            if m:
+                bump(skills, m.group(1), ts)
+        elif "command-name" in line:
+            m = CMD_RE.search(line)
+            if m:
+                bump(skills, m.group(1), ts)
+        for m in MCP_RE.finditer(line):
+            bump(mcp, m.group(1)[len("mcp__"):], ts)
+    proc.wait()
+    return skills, mcp
+
+
+def age_days(iso):
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - dt).days
+
+
+def verdict(count, last_iso):
+    if count == 0:
+        return "❌ never used"
+    d = age_days(last_iso)
+    if d is not None and d > STALE_DAYS:
+        return f"⚠️  stale ({d}d)"
+    return "✅ keep"
+
+
+def fmt_last(iso):
+    d = age_days(iso)
+    if d is None:
+        return "never"
+    return "today" if d == 0 else f"{d}d ago"
+
+
+def main():
+    as_json = "--json" in sys.argv
+    inv = inventory()
+    skill_use, mcp_use = usage()
+
+    rows = []
+    for key, meta in inv.items():
+        cnt, last = skill_use.get(key, (0, ""))
+        rows.append({"name": key, "source": meta["source"], "cost": meta["cost"],
+                     "uses": cnt, "last": last, "verdict": verdict(cnt, last)})
+    rows.sort(key=lambda r: (r["uses"] > 0, -r["cost"]))
+
+    mcp_rows = [{"server": k, "uses": c, "last": t} for k, (c, t) in
+                sorted(mcp_use.items(), key=lambda kv: -kv[1][0])]
+
+    if as_json:
+        json.dump({"skills": rows, "mcp": mcp_rows}, sys.stdout, ensure_ascii=False, indent=2)
+        print()
+        return
+
+    w = max((len(r["name"]) for r in rows), default=10)
+    print(f"{'SKILL':<{w}}  {'COST(tok)':>9}  {'USES':>5}  {'LAST':>8}  VERDICT")
+    for r in rows:
+        print(f"{r['name']:<{w}}  {r['cost']:>9}  {r['uses']:>5}  {fmt_last(r['last']):>8}  {r['verdict']}")
+
+    dead = [r for r in rows if r["uses"] == 0]
+    total = sum(r["cost"] for r in rows)
+    dead_cost = sum(r["cost"] for r in dead)
+    print(f"\n{len(rows)} skills, ~{total} tokens of descriptions loaded every session.")
+    print(f"{len(dead)} never used → ~{dead_cost} tokens/session ({dead_cost * 100 // max(total, 1)}%) are pure context tax.")
+
+    if mcp_rows:
+        print("\nMCP tool calls seen in transcripts (server: calls, last):")
+        for r in mcp_rows:
+            print(f"  {r['server']}: {r['uses']} ({fmt_last(r['last'])})")
+
+
+if __name__ == "__main__":
+    main()
