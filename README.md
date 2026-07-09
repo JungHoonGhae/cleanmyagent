@@ -16,11 +16,12 @@ CONTEXT TAX
   every session      ████████████████████  ~10,315 tok of skill descriptions
   never-used share   ██████████████░░░░░░  ~6,986 tok (68%) buys you nothing
 
-STANDALONE SKILLS (32)
-  SKILL                          COST   USES      LAST  VERDICT
-  utm-macos-vm                    199      ·         —  ✗ unused
-  humanizer                       140      9    1d ago  ✓ keep
-  figma-diff                      133      2   87d ago  ◌ stale 87d
+STANDALONE SKILLS (34)
+  SKILL                          COST  INSTALLED   USES      LAST  VERDICT
+  utm-macos-vm                    199        27d      ·         —  ✗ unused
+  brandkit                        118        12d      ·         —  ◦ new (12d)
+  humanizer                       140       109d      9    1d ago  ✓ keep
+  figma-diff                      133       113d      2   87d ago  ◌ stale 87d
   ...
 
 GSTACK (56 skills, managed as a suite)             ███░░░░░░░░░ 12/56 used
@@ -74,7 +75,11 @@ member breaks the suite or gets reverted on the next update. Instead:
 - standalone skill unused → `rm -rf` for **every** copy across skill dirs
 
 Verdicts: `✗ unused` → delete candidate · `◌ stale` unused >30 days · `✓ keep` ·
-`· bundle` judged at bundle level.
+`◦ new` installed <14 days ago, too fresh to judge (grace period, excluded from
+`--fix`) · `· bundle` judged at bundle level.
+
+Install dates come from the skill directory's creation time (`st_birthtime`,
+mtime fallback) — an update that rewrites the directory resets the clock.
 
 Token costs are a heuristic estimate (~4 chars/token ASCII, ~1.5 CJK) — good enough
 for ranking, not billing.

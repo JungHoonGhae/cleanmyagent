@@ -43,6 +43,7 @@ GEMINI = os.path.expanduser("~/.gemini")
 OPENCLAW = os.path.expanduser("~/.openclaw")
 HERMES = os.path.expanduser("~/.hermes")
 STALE_DAYS = 30
+GRACE_DAYS = 14  # unused but installed recently → "new", not a delete candidate
 
 COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
@@ -85,6 +86,17 @@ def read_frontmatter_desc(path):
 
 # ---------------------------------------------------------------- inventory
 
+def birthtime(path):
+    """Creation time of the skill dir (mtime fallback) as ISO — the install date."""
+    d = os.path.dirname(path)
+    try:
+        st = os.stat(d)
+        t = getattr(st, "st_birthtime", st.st_mtime)
+    except OSError:
+        return ""
+    return datetime.fromtimestamp(t, timezone.utc).isoformat()
+
+
 def gstack_members():
     """gstack installs its repo at <skills>/gstack — its skill subdirs define the suite."""
     members = set()
@@ -117,9 +129,10 @@ def scan_skill_dir(inv, skills_dir, source, bundle=None):
         if name in inv:
             if source not in inv[name]["sources"]:
                 inv[name]["sources"].append(source)
+            inv[name]["installed"] = min(inv[name]["installed"], birthtime(p))
             continue
         inv[name] = {"sources": [source], "cost": est_tokens(name + desc),
-                     "path": p, "bundle": b}
+                     "path": p, "bundle": b, "installed": birthtime(p)}
 
 
 def inventory():
@@ -158,7 +171,7 @@ def inventory():
                     desc = read_frontmatter_desc(p)
                     inv[key] = {"sources": ["claude"], "cost": est_tokens(key + desc),
                                 "path": p, "bundle": f"plugin:{plugin}",
-                                "marketplace": market}
+                                "marketplace": market, "installed": birthtime(p)}
     return inv
 
 
@@ -350,6 +363,9 @@ def verdict(row):
     if row["bundle"]:
         return ("bundle", "· bundle")  # judged at bundle level
     if row["uses"] == 0:
+        a = age_days(row["installed"])
+        if a is not None and a < GRACE_DAYS:
+            return ("new", f"◦ new ({a}d)")  # too fresh to judge
         return ("unused", "✗ unused")
     d = age_days(row["last"])
     if d is not None and d > STALE_DAYS:
@@ -363,7 +379,8 @@ def build_rows(inv, skill_use):
         cnt, last = skill_use.get(key, (0, ""))
         row = {"name": key, "sources": meta["sources"], "cost": meta["cost"],
                "path": meta["path"], "bundle": meta["bundle"],
-               "marketplace": meta.get("marketplace", ""), "uses": cnt, "last": last}
+               "marketplace": meta.get("marketplace", ""), "uses": cnt, "last": last,
+               "installed": meta.get("installed", "")}
         row["status"], row["verdict"] = verdict(row)
         rows.append(row)
     return rows
@@ -379,7 +396,7 @@ def fix_commands(rows, mcp_rows):
             bundles.setdefault(r["bundle"], []).append(r)
 
     for r in standalone:
-        if r["uses"] == 0:
+        if r["status"] == "unused":  # "new" installs get a grace period
             # a skill can live in several skill dirs (inventory dedupes) — rm every copy
             for base in (os.path.join(CLAUDE, "skills"), os.path.join(AGENTS, "skills"),
                          os.path.join(CODEX, "skills"), os.path.join(OPENCODE_CFG, "skill"),
@@ -391,8 +408,9 @@ def fix_commands(rows, mcp_rows):
 
     for bundle, brows in sorted(bundles.items()):
         used = sum(1 for r in brows if r["uses"] > 0)
-        if used:
-            continue  # partially/fully used bundles are kept whole
+        ages = [age_days(r["installed"]) for r in brows]
+        if used or any(a is not None and a < GRACE_DAYS for a in ages):
+            continue  # used, or freshly installed — kept whole
         n = len(brows)
         if bundle.startswith("plugin:"):
             cmds.append(f"claude plugin disable {bundle[7:]}  # all {n} skills unused")
@@ -409,7 +427,14 @@ def fix_commands(rows, mcp_rows):
 
 # ---------------------------------------------------------------- report
 
-VERDICT_PAINT = {"unused": red, "stale": yellow, "keep": green, "bundle": dim}
+VERDICT_PAINT = {"unused": red, "stale": yellow, "keep": green, "bundle": dim, "new": cyan}
+
+
+def fmt_installed(iso):
+    d = age_days(iso)
+    if d is None:
+        return "—"
+    return "today" if d == 0 else f"{d}d" if d < 365 else f"{d // 365}y{d % 365 // 30}m"
 
 
 def print_table(rows, width):
@@ -417,7 +442,8 @@ def print_table(rows, width):
         paint = VERDICT_PAINT[r["status"]]
         name = f"{r['name']:<{width}}"
         line = (f"  {name if r['status'] != 'unused' else dim(name)}  "
-                f"{r['cost']:>5}  {r['uses'] if r['uses'] else '·':>5}  "
+                f"{r['cost']:>5}  {fmt_installed(r['installed']):>9}  "
+                f"{r['uses'] if r['uses'] else '·':>5}  "
                 f"{fmt_last(r['last']):>8}  {paint(r['verdict'])}")
         print(line)
 
@@ -456,7 +482,8 @@ def report(rows, mcp_rows):
           f"({frac:.0%}) buys you nothing")
 
     w = max(max((len(r["name"]) for r in rows), default=10), 10)
-    header = f"  {'SKILL':<{w}}  {'COST':>5}  {'USES':>5}  {'LAST':>8}  VERDICT"
+    header = (f"  {'SKILL':<{w}}  {'COST':>5}  {'INSTALLED':>9}  "
+              f"{'USES':>5}  {'LAST':>8}  VERDICT")
 
     print(f"\n{bold('STANDALONE SKILLS')} {dim(f'({len(standalone)})')}")
     print(dim(header))
