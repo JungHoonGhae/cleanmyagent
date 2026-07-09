@@ -102,17 +102,54 @@ def est_tokens(s):
     return int(ascii_n / 4 + (len(s) - ascii_n) / 1.5)
 
 
-def read_frontmatter_desc(path):
+def read_frontmatter(path):
+    """(description, set of frontmatter keys)"""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             text = f.read(20000)
     except OSError:
-        return ""
+        return "", set()
     m = re.match(r"---\n(.*?)\n---", text, re.S)
     if not m:
-        return ""
-    dm = re.search(r"^description:\s*(.*(?:\n[ \t]+.*)*)", m.group(1), re.M)
-    return dm.group(1).strip().strip("\"'") if dm else ""
+        return "", set()
+    fm = m.group(1)
+    dm = re.search(r"^description:\s*(.*(?:\n[ \t]+.*)*)", fm, re.M)
+    desc = dm.group(1).strip().strip("\"'") if dm else ""
+    return desc, set(re.findall(r"^([A-Za-z_-]+):", fm, re.M))
+
+
+# distribution fingerprints in frontmatter — hand-made skills rarely carry these
+DIST_KEYS = {"version", "platforms", "license", "source", "homepage", "author", "repository"}
+# development artifacts — distributed skills ship docs (references/), not eval harnesses
+CUSTOM_DIRS = ("scripts", "evals")
+
+ORIGIN_FILE = os.path.expanduser("~/.config/cleanmyagent/origins.json")
+
+
+def load_origin_overrides():
+    try:
+        return json.load(open(ORIGIN_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+ORIGIN_OVERRIDES = load_origin_overrides()
+
+
+def detect_origin(name, path, fm_keys, bundle):
+    """custom (you wrote it) / dist (installed from somewhere) / ? (can't tell).
+    ponytail: heuristic — brandkit-style installs with bare frontmatter stay '?',
+    which --fix treats as 'verify before delete'. Pin exceptions in origins.json."""
+    if name in ORIGIN_OVERRIDES:
+        return ORIGIN_OVERRIDES[name]
+    if bundle:
+        return "dist"
+    if fm_keys & DIST_KEYS:
+        return "dist"
+    d = os.path.dirname(path)
+    if any(os.path.isdir(os.path.join(d, s)) for s in CUSTOM_DIRS):
+        return "custom"
+    return "?"
 
 
 # ---------------------------------------------------------------- inventory
@@ -154,7 +191,7 @@ def scan_skill_dir(inv, skills_dir, source, bundle=None):
         p = os.path.join(skills_dir, name, "SKILL.md")
         if not os.path.isfile(p):
             continue
-        desc = read_frontmatter_desc(p)
+        desc, fm_keys = read_frontmatter(p)
         # gstack suite: membership from its repo dir; "(gstack)" desc suffix as fallback
         b = bundle or ("gstack" if name in GSTACK or re.search(r"\(gstack\)\s*$", desc) else None)
         if name in inv:
@@ -163,7 +200,8 @@ def scan_skill_dir(inv, skills_dir, source, bundle=None):
             inv[name]["installed"] = min(inv[name]["installed"], birthtime(p))
             continue
         inv[name] = {"sources": [source], "cost": est_tokens(name + desc),
-                     "path": p, "bundle": b, "installed": birthtime(p)}
+                     "path": p, "bundle": b, "installed": birthtime(p),
+                     "origin": detect_origin(name, p, fm_keys, b)}
 
 
 def inventory():
@@ -199,10 +237,11 @@ def inventory():
                 p = os.path.join(sdir, name, "SKILL.md")
                 key = f"{plugin}:{name}"
                 if os.path.isfile(p) and key not in inv:
-                    desc = read_frontmatter_desc(p)
+                    desc, _ = read_frontmatter(p)
                     inv[key] = {"sources": ["claude"], "cost": est_tokens(key + desc),
                                 "path": p, "bundle": f"plugin:{plugin}",
-                                "marketplace": market, "installed": birthtime(p)}
+                                "marketplace": market, "installed": birthtime(p),
+                                "origin": "dist"}
     return inv
 
 
@@ -286,7 +325,9 @@ def usage_claude(skills, mcp):
             if m:
                 bump(skills, m.group(1), ts)
         for m in MCP_RE.finditer(line):
-            bump(mcp, m.group(1)[len("mcp__"):], ts)
+            key = m.group(1)[len("mcp__"):]
+            cnt, first, last = mcp.get(key, (0, "9", ""))
+            mcp[key] = (cnt + 1, min(first, ts or "9"), max(last, ts or ""))
 
 
 def usage_skillmd_mentions(skills, root, list_marker):
@@ -456,7 +497,7 @@ def build_rows(inv, skill_use):
         row = {"name": key, "sources": meta["sources"], "cost": meta["cost"],
                "path": meta["path"], "bundle": meta["bundle"],
                "marketplace": meta.get("marketplace", ""), "uses": cnt, "last": last,
-               "installed": meta.get("installed", "")}
+               "installed": meta.get("installed", ""), "origin": meta.get("origin", "?")}
         row["status"], row["verdict"] = verdict(row)
         rows.append(row)
     return rows
@@ -473,6 +514,10 @@ def fix_commands(rows, mcp_rows):
 
     for r in standalone:
         if r["status"] == "unused":  # "new" installs get a grace period
+            # hand-made (or unverifiable) skills are shown but not armed —
+            # a custom skill is often irreplaceable knowledge, not a reinstall away
+            guard = "# REVIEW (looks hand-made): " if r["origin"] == "custom" else \
+                    "# VERIFY (origin unknown): " if r["origin"] == "?" else ""
             # a skill can live in several skill dirs (inventory dedupes) — rm every copy
             for base in (os.path.join(CLAUDE, "skills"), os.path.join(AGENTS, "skills"),
                          os.path.join(CODEX, "skills"), os.path.join(OPENCODE_CFG, "skill"),
@@ -480,7 +525,7 @@ def fix_commands(rows, mcp_rows):
                          os.path.join(OPENCLAW, "skills"), os.path.join(HERMES, "skills")):
                 d = os.path.join(base, r["name"])
                 if os.path.isdir(d):
-                    cmds.append(f"rm -rf {d}")
+                    cmds.append(f"{guard}rm -rf {d}")
 
     for bundle, brows in sorted(bundles.items()):
         used = sum(1 for r in brows if r["uses"] > 0)
@@ -528,7 +573,9 @@ def table_lines(rows, width):
     for r in rows:
         paint = VERDICT_PAINT[r["status"]]
         name = f"{r['name']:<{width}}"
+        origin = {"custom": cyan("✎ custom"), "dist": dim("dist"), "?": yellow("?")}[r["origin"]]
         lines.append(f"{name if r['status'] != 'unused' else dim(name)}  "
+                     f"{origin}{' ' * (8 - vlen(origin))}  "
                      f"{r['cost']:>5}  {fmt_installed(r['installed']):>9}  "
                      f"{r['uses'] if r['uses'] else '·':>5}  "
                      f"{fmt_last(r['last']):>8}  {paint(r['verdict']):<14}")
@@ -558,7 +605,7 @@ def report(rows, mcp_rows):
               "hermes" if os.path.isdir(HERMES) else None]
 
     w = max(max((len(r["name"]) for r in rows), default=10), 10)
-    header = dim(f"{'SKILL':<{w}}  {'COST':>5}  {'INSTALLED':>9}  "
+    header = dim(f"{'SKILL':<{w}}  {'ORIGIN':<8}  {'COST':>5}  {'INSTALLED':>9}  "
                  f"{'USES':>5}  {'LAST':>8}  {'VERDICT':<14}")
 
     frac = dead_cost / total if total else 0
@@ -596,7 +643,10 @@ def report(rows, mcp_rows):
         lines = []
         for r in mcp_rows:
             if r["uses"]:
-                lines.append(f"{green('✓')} {r['server']:<28} {r['uses']:>5} calls  {fmt_last(r['last']):>8}")
+                # MCP config carries no install date — first call seen is the proxy
+                since = f"since {fmt_installed(r['first'])}" if r["first"] else ""
+                lines.append(f"{green('✓')} {r['server']:<28} {r['uses']:>5} calls  "
+                             f"{fmt_last(r['last']):>8}  {dim(f'{since:>12}')}")
             else:
                 lines.append(f"{red('✗')} {r['server']:<28} {dim('configured, never called')}")
         panels.append(("mcp servers", lines))
@@ -614,9 +664,9 @@ def main():
     rows.sort(key=sort_key)
 
     for s in configured_mcp():
-        mcp_use.setdefault(s, (0, ""))
-    mcp_rows = [{"server": k, "uses": n, "last": t} for k, (n, t) in
-                sorted(mcp_use.items(), key=lambda kv: -kv[1][0])]
+        mcp_use.setdefault(s, (0, "9", ""))
+    mcp_rows = [{"server": k, "uses": n, "first": ("" if f == "9" else f), "last": t}
+                for k, (n, f, t) in sorted(mcp_use.items(), key=lambda kv: -kv[1][0])]
 
     if "--fix" in argv:
         for cmd in fix_commands(rows, mcp_rows):

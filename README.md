@@ -44,6 +44,28 @@ Rows are sorted by action priority: `✗ unused` (biggest context win first) →
 `◌ stale` → `◦ new` → `✓ keep` (most used first). Meters use a btop-style
 green→red gradient on truecolor terminals; `NO_COLOR` and pipes get plain text.
 
+## Hand-made vs installed (ORIGIN)
+
+Deleting an installed skill costs a reinstall; deleting one you wrote costs the
+work itself. The ORIGIN column classifies each standalone skill:
+
+- `✎ custom` — has development artifacts (`scripts/`, `evals/`) and no
+  distribution fingerprints → `--fix` comments the command out with `# REVIEW`
+- `dist` — bundle member, or frontmatter carries distribution fingerprints
+  (`version:`, `platforms:`, `license:`, `source:`, …) → safe to arm
+- `?` — can't tell (many installed skills ship bare `name`+`description`
+  frontmatter too) → `--fix` comments it out with `# VERIFY`
+
+The heuristic is deliberately conservative: only `dist` gets executable `rm`
+lines. Pin exceptions in `~/.config/cleanmyagent/origins.json`:
+
+```json
+{ "my-handmade-skill": "custom", "brandkit": "dist" }
+```
+
+MCP servers carry no install date in `~/.claude.json`, so the report shows
+`since <first call seen in transcripts>` as the closest available proxy.
+
 ## Usage
 
 ```bash
