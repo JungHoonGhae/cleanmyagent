@@ -67,18 +67,41 @@ lines. Pin exceptions in `~/.config/cleanmyagent/origins.json`:
 MCP servers carry no install date in `~/.claude.json`, so the report shows
 `since <first call seen in transcripts>` as the closest available proxy.
 
+## Install
+
+One file, Python 3 stdlib only — nothing to build:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JungHoonGhae/cleanmyagent/main/cleanmyagent \
+  -o ~/.local/bin/cleanmyagent && chmod +x ~/.local/bin/cleanmyagent
+```
+
+(or `git clone` and symlink; a Homebrew tap is on the roadmap)
+
 ## Usage
 
 ```bash
-./cleanmyagent              # audit report (colors on a tty, NO_COLOR respected)
-./cleanmyagent --sort cost  # action (default) · cost · uses · installed · last · name
-./cleanmyagent --json       # machine-readable
-./cleanmyagent --fix        # print cleanup commands — never executes them
+cleanmyagent                # audit report (colors on a tty, NO_COLOR respected)
+cleanmyagent --sort cost    # action (default) · cost · uses · installed · last · name
+cleanmyagent --json         # machine-readable
+cleanmyagent --fix          # print cleanup commands — never executes them
 ```
 
 On a tty the report stays open btop-style: press `a`/`c`/`u`/`i`/`l`/`n` to
 re-sort by action/cost/uses/installed/last/name instantly (the scan runs only
-once), `q` to quit.
+once), `q` to quit. Panels stretch to the terminal width.
+
+Extra panels on a color terminal:
+
+- **context-tax map** — treemap ribbon at group granularity: segment width ∝
+  tokens/session, color = how much of that spend is never-used waste
+  (green = all earning, red = all waste)
+- **design hints** — structural anti-patterns in skills *you can edit*:
+  fat descriptions (always loaded), keyword-catalog descriptions, monolithic
+  bodies with no `references/` split (whole thing loads on invoke),
+  low-utilization plugins worth disabling, MCP servers riding along for 1-2
+  niche tools. The loading model: description = every session · body = on
+  invoke · references/ = on demand.
 
 Local-first: reads only local files, no network, no accounts. Python 3 stdlib, zero deps.
 
