@@ -32,6 +32,8 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 
 CLAUDE = os.path.expanduser(os.environ.get("CLAUDE_HOME", "~/.claude"))
@@ -213,11 +215,41 @@ TS_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
 CODEX_SKILL_RE = re.compile(r"skills/([A-Za-z0-9_.-]+)/SKILL\.md")
 
 
-def status(msg=""):
-    """Transient progress line on stderr — the claude scan alone chews ~15s of transcripts."""
-    if sys.stderr.isatty():
-        sys.stderr.write("\r\x1b[2K" + (f"\x1b[2m⏳ {msg}\x1b[0m" if msg else ""))
+class Progress:
+    """Transient stderr progress — the claude scan alone chews 10s+ of transcripts,
+    so a background ticker keeps elapsed time and event count moving."""
+    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self):
+        self.on = sys.stderr.isatty()
+        self.msg, self.n, self.t0, self.i = "", 0, time.time(), 0
+        if self.on:
+            self._stop = threading.Event()
+            threading.Thread(target=self._tick, daemon=True).start()
+
+    def _tick(self):
+        while not self._stop.wait(0.1):
+            self._draw()
+
+    def _draw(self):
+        self.i += 1
+        spin = self.FRAMES[self.i % len(self.FRAMES)]
+        cnt = f" · {self.n:,} events" if self.n else ""
+        sys.stderr.write(f"\r\x1b[2K\x1b[2m{spin} {self.msg}{cnt}"
+                         f" · {time.time() - self.t0:.1f}s\x1b[0m")
         sys.stderr.flush()
+
+    def stage(self, msg):
+        self.msg = msg
+
+    def done(self):
+        if self.on:
+            self._stop.set()
+            sys.stderr.write("\r\x1b[2K")
+            sys.stderr.flush()
+
+
+PROG = Progress()
 
 
 def bump(d, key, ts):
@@ -240,12 +272,9 @@ def grep_lines(patterns, root, include="*.jsonl"):
 
 
 def usage_claude(skills, mcp):
-    n = 0
     for line in grep_lines(['"name":"Skill"', "command-name", '"name":"mcp__'],
                            os.path.join(CLAUDE, "projects")):
-        n += 1
-        if n % 2000 == 0:
-            status(f"scanning claude-code transcripts … {n:,} events")
+        PROG.n += 1
         ts_m = TS_RE.search(line)
         ts = ts_m.group(1) if ts_m else ""
         if '"name":"Skill"' in line:
@@ -265,6 +294,7 @@ def usage_skillmd_mentions(skills, root, list_marker):
     # skill-list injection (list_marker) is excluded so listing != using.
     # ponytail: mention ≈ use — good enough for keep/delete ranking.
     for line in grep_lines(["SKILL.md"], root):
+        PROG.n += 1
         if list_marker in line:
             continue
         ts_m = TS_RE.search(line)
@@ -357,20 +387,19 @@ def usage_gstack(skills):
 
 def usage():
     skills, mcp = {}, {}
-    status("scanning claude-code transcripts …")
-    usage_claude(skills, mcp)
-    status("scanning codex sessions …")
-    usage_skillmd_mentions(skills, os.path.join(CODEX, "sessions"), "### Available skills")
-    status("scanning openclaw sessions …")
-    usage_skillmd_mentions(skills, os.path.join(OPENCLAW, "agents"), "<available_skills>")
-    status("scanning opencode db …")
-    usage_opencode(skills)
-    status("scanning gemini chats …")
-    usage_gemini(skills)
-    status("scanning hermes db …")
-    usage_hermes(skills)
-    usage_gstack(skills)
-    status()  # clear the line
+    for label, fn in (
+            ("claude-code transcripts", lambda: usage_claude(skills, mcp)),
+            ("codex sessions", lambda: usage_skillmd_mentions(
+                skills, os.path.join(CODEX, "sessions"), "### Available skills")),
+            ("openclaw sessions", lambda: usage_skillmd_mentions(
+                skills, os.path.join(OPENCLAW, "agents"), "<available_skills>")),
+            ("opencode db", lambda: usage_opencode(skills)),
+            ("gemini chats", lambda: usage_gemini(skills)),
+            ("hermes db", lambda: usage_hermes(skills)),
+            ("gstack analytics", lambda: usage_gstack(skills))):
+        PROG.stage(f"scanning {label} …")
+        fn()
+    PROG.done()
     return skills, mcp
 
 
